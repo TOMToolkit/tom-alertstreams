@@ -49,12 +49,15 @@ ALERT_STREAMS = [
         'NAME': 'tom_alertstreams.alertstreams.hopskotch.HopskotchAlertStream',
         'OPTIONS': {
             'URL': 'kafka://kafka.scimma.org/',
+            'GROUP_ID': 'uniqueidforyourapp12345',
             'USERNAME': os.getenv('SCIMMA_AUTH_USERNAME', None),
             'PASSWORD': os.getenv('SCIMMA_AUTH_PASSWORD', None),
             'TOPIC_HANDLERS': {
                 'sys.heartbeat': 'tom_alertstreams.alertstreams.hopskotch.heartbeat_handler',
                 'tomtoolkit.test': 'tom_alertstreams.alertstreams.hopskotch.alert_logger',
                 'hermes.test': 'tom_alertstreams.alertstreams.hopskotch.alert_logger',
+                'hermes.*': 'regex match public topics here, requires * handler to be defined'
+                '*': 'default_handler_here'
             },
         },
     },

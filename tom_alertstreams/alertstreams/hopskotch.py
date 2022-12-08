@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import logging
-
+import re
+from django.utils import timezone as tz
 from django.core.exceptions import ImproperlyConfigured
 
 from hop import Stream
@@ -18,12 +19,13 @@ class HopskotchAlertStream(AlertStream):
     """
     """
     required_keys = ['URL', 'USERNAME', 'PASSWORD', 'TOPIC_HANDLERS']
-    allowed_keys = ['URL', 'USERNAME', 'PASSWORD', 'TOPIC_HANDLERS']
-
+    allowed_keys = ['URL', 'GROUP_ID', 'USERNAME', 'PASSWORD', 'TOPIC_HANDLERS']
+    PUBLIC_TOPIC_CHECK_INTERVAL = 300  # Seconds between checking for new public topics
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # the following methods may fail if improperly configured.
         # So, do them now to catch any errors, before listen() is spawned in it's own Process.
+        self.public_topics = self.get_all_public_topics()
         self.stream_url = self.get_stream_url()
         self.stream = self.get_stream()
 
@@ -73,9 +75,9 @@ class HopskotchAlertStream(AlertStream):
         specified_topics = list(self.topic_handlers.keys())
         if '*' in specified_topics:
             # Add all public topics if a asterisk is set in the topic_handlers
-            public_topics = self.get_all_public_topics()
-            specified_topics.remove('*')
-            specified_topics = list(set(specified_topics + public_topics))
+            specified_topics = list(set(specified_topics + self.public_topics))
+        # Also remove topics with wildcards in them
+        specified_topics = [topic for topic in specified_topics if '*' in topic]
 
         topics = ','.join(specified_topics)  # 'topic1,topic2,topic3'
         hopskotch_stream_url = base_stream_url + topics
@@ -92,27 +94,46 @@ class HopskotchAlertStream(AlertStream):
 
     def listen(self):
         super().listen()
-
         # TODO: Provide example of making this a collections.defaultdict with a
         # default_factory which handles unexpected topics nicely.
 
         # TODO: alternatively, WARN upon OPTIONS['topics'] extries that don't have
         # handlers in the alert_handler. (i.e they've configured a topic subscription
         # without providing a handler for the topic. So, warn them).
-
-        with self.stream.open(self.stream_url, 'r') as src:
-            for alert, metadata in src.read(metadata=True):
-                # type(gcn_circular) is <hop.models.GNCCircular>
-                # type(metadata) is <hop.io.Metadata>
-                if metadata.topic in self.alert_handler:
-                    # TODO: should probably use *args, **kwargs to pass unknow number of arguments
-                    self.alert_handler[metadata.topic](alert, metadata)
-                elif '*' in self.alert_handler:
-                    self.alert_handler['*'](alert, metadata)
-                else:
-                    logger.error(f'alert from topic {metadata.topic} received but no handler defined. err: {err}')
-                    # TODO: should define a default handler for all unhandeled topics
-
+        last_check_time = tz.now()
+        while True:
+            try:
+                with self.stream.open(self.stream_url, 'r', group_id=self.group_id) as src:
+                    for alert, metadata in src.read(metadata=True):
+                        # type(gcn_circular) is <hop.models.GNCCircular>
+                        # type(metadata) is <hop.io.Metadata>
+                        if metadata.topic in self.alert_handler:
+                            # TODO: should probably use *args, **kwargs to pass unknow number of arguments
+                            self.alert_handler[metadata.topic](alert, metadata)
+                        elif '*' in self.alert_handler:
+                            # First check all wildcard topics to see if they will match this topic
+                            matched_handler = False
+                            for topic in self.alert_handler.keys():
+                                if '*' in topic and re.match(topic, metadata.topic):
+                                    self.alert_handler[topic](alert, metadata)
+                                    matched_handler = True
+                                    break
+                            # If nothing matched, fall back to default public topic handler
+                            if not matched_handler:
+                                self.alert_handler['*'](alert, metadata)
+                        else:
+                            logger.error(f'alert from topic {metadata.topic} received but no handler defined. err: {err}')
+                            # TODO: should define a default handler for all unhandeled topics
+                        if (tz.now - last_check_time).total_seconds() > self.PUBLIC_TOPIC_CHECK_INTERVAL:
+                            last_check_time = tz.now()
+                            public_topics = self.get_all_public_topics()
+                            if set(public_topics) != set(self.public_topics):
+                                logger.info(f"New public topics found, restarting hop stream")
+                                self.public_topics = public_topics
+                                self.stream_url = self.get_stream_url()
+                                break
+            except Exception as ex:
+                logger.error(ex)
 
 def heartbeat_handler(heartbeat: JSONBlob, metadata: Metadata):
     """Example alert handler for HopskotchAlertStream sys.heartbeat topic.
