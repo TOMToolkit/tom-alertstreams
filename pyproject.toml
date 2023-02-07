@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tom-alertstreams"
-version = "0.5.1"
+version = "0.6.0"
 description = "Reusable TOMToolkit app for listening to kafka streams."
 authors = ["TOM Toolkit Project <tomtoolkit@lco.global>", "Lindy Lindstrom <llindstrom@lco.global>"]
 license = "GPL-3.0-only"
@@ -36,7 +36,7 @@ python = ">=3.8,<3.12"
 tomtoolkit = "^2.10"
 psycopg2-binary = "^2.9"
 gcn-kafka = "^0.2"
-hop-client = "^0.7"
+hop-client = "^0.8"
 
 [tool.poetry.dev-dependencies]
 coverage = "^6.3.2"

@@ -49,12 +49,16 @@ ALERT_STREAMS = [
         'NAME': 'tom_alertstreams.alertstreams.hopskotch.HopskotchAlertStream',
         'OPTIONS': {
             'URL': 'kafka://kafka.scimma.org/',
+            # The hop-client requires that the GROUP_ID prefix match the SCIMMA_AUTH_USERNAME
+            'GROUP_ID': os.getenv('SCIMMA_AUTH_USERNAME', "") + '-' + 'uniqueidforyourapp12345',
             'USERNAME': os.getenv('SCIMMA_AUTH_USERNAME', None),
             'PASSWORD': os.getenv('SCIMMA_AUTH_PASSWORD', None),
             'TOPIC_HANDLERS': {
                 'sys.heartbeat': 'tom_alertstreams.alertstreams.hopskotch.heartbeat_handler',
                 'tomtoolkit.test': 'tom_alertstreams.alertstreams.hopskotch.alert_logger',
                 'hermes.test': 'tom_alertstreams.alertstreams.hopskotch.alert_logger',
+                'hermes.*': 'regex match public topics here, requires * handler to be defined'
+                '*': 'default_handler_here'
             },
         },
     },
@@ -93,6 +97,7 @@ the `AlertStream` subclass should document what is expected. Typically, a URL, a
 dictionary, `TOPIC_HANDLERS`, will be required. See "Subclassing `AlertStream`" below. The `AlertStream` subclass will
 convert the key-value pairs of the `OPTIONS` dictionary into properties (and values) of the `AlertStream` subclass
 instance.
+  * The hopskotch alert stream supports a wildcard of `*` for an alert handler topic name. If specified, ALL public topics will be subscribed and use that handler function. A directly specified topic handler will always be used before the `*` handler for any topic that is covered twice. 
 
 ### Getting Kafka Stream Credentials
 As part of your `OPTIONS` for each Kafka stream, you need to configure access credentials. Visit these links

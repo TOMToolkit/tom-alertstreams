@@ -1,4 +1,4 @@
 Django~=4.1
 psycopg2-binary~=2.9
 gcn-kafka~=0.2
-hop-client~=0.7
+hop-client~=0.8
