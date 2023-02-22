@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.1/ref/settings/
 import logging.config
 import os
 from pathlib import Path
+import datetime
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -158,15 +159,18 @@ ALERT_STREAMS = [
         'NAME': 'tom_alertstreams.alertstreams.hopskotch.HopskotchAlertStream',
         'OPTIONS': {
             # The hop-client requires that the GROUP_ID prefix match the SCIMMA_AUTH_USERNAME
-            'GROUP_ID': os.getenv('SCIMMA_AUTH_USERNAME', "") + '-' + os.getenv('HOPSKOTCH_GROUP_ID', 'tom-alertstreams-dev'),
+            'GROUP_ID': os.getenv('SCIMMA_AUTH_USERNAME', "") + '-' +
+                        os.getenv('HOPSKOTCH_GROUP_ID', 'tom-alertstreams-dev') + '-' +
+                        f'{datetime.datetime.now().microsecond}',
             'URL': 'kafka://kafka.scimma.org/',
             'USERNAME': os.getenv('SCIMMA_AUTH_USERNAME', None),
             'PASSWORD': os.getenv('SCIMMA_AUTH_PASSWORD', None),
             'TOPIC_HANDLERS': {
-                'sys.heartbeat': 'tom_alertstreams.alertstreams.hopskotch.heartbeat_handler',
-                'sys.heartbeatnew': 'tom_alertstreams.alertstreams.hopskotch.heartbeat_handler',
+                #'sys.heartbeat': 'tom_alertstreams.alertstreams.hopskotch.heartbeat_handler',
+                #'sys.heartbeatnew': 'tom_alertstreams.alertstreams.hopskotch.heartbeat_handler',
                 'tomtoolkit.test': 'tom_alertstreams.alertstreams.hopskotch.alert_logger',
                 'hermes.test': 'tom_alertstreams.alertstreams.hopskotch.alert_logger',
+                #'igwn.gwalert': 'tom_alertstreams.alertstreams.hopskotch.igwn_alert_logger',
             },
         },
     },
