@@ -6,9 +6,12 @@ import uuid
 from django.utils import timezone as tz
 from django.core.exceptions import ImproperlyConfigured
 
+import fastavro
+import fastavro.schema
+
 from hop import Stream
 from hop.auth import Auth
-from hop.models import JSONBlob
+from hop.models import JSONBlob, AvroBlob
 from hop.io import Metadata, StartPosition, list_topics
 
 from tom_alertstreams.alertstreams.alertstream import AlertStream
@@ -91,6 +94,7 @@ class HopskotchAlertStream(AlertStream):
         hop_auth = Auth(self.username, self.password)
 
         # TODO: allow StartPosition to be set from OPTIONS configuration dictionary
+        logger.info(f'Instanciating Stream for {hop_auth.username} with start {start_position}')
         stream = Stream(auth=hop_auth, start_at=start_position)
         return stream
 
@@ -161,3 +165,36 @@ def alert_logger(alert: JSONBlob, metadata: Metadata):
         # in this case the alert was probably published with hop-client<0.8.0
         alert_uuid = None
     logger.info(f'Alert (uuid={alert_uuid}) received on topic {metadata.topic}: {alert};  metatdata: {metadata}')
+
+
+def igwn_alert_logger(alert: JSONBlob, metadata: Metadata):
+    """Example alert handler. The method signsture is specific to Hopskotch alerts.
+    """
+    # search the header (list of tuples) for a UUID-tuple (keyed by '_id')
+    # eg. ('_id', b'$\xd6oGmVM\xed\x97\xe7|\x1c\x8f\x11V\xe9')
+    alert_uuid_tuple = next((item for item in metadata.headers if item[0] == '_id'), None)
+    if alert_uuid_tuple:
+        alert_uuid = uuid.UUID(bytes=alert_uuid_tuple[1])
+    else:
+        # in this case the alert was probably published with hop-client<0.8.0
+        alert_uuid = None
+
+    logger.info(f'igwn_alert_logger:: Alert (uuid={alert_uuid}) received on topic {metadata.topic}: metatdata: {metadata}')
+    logger.info(f'igwn_alert_logger:: Alert (uuid={alert_uuid}) received a {type(alert)}')
+
+    if isinstance(alert, AvroBlob):
+        logger.info(f'igwn_alert_logger:: Alert (uuid={alert_uuid}) alert.schema: {alert.schema}')
+        logger.info(f'igwn_alert_logger:: Alert (uuid={alert_uuid}) alert.format_name: {alert.format_name}')
+        logger.info(f'igwn_alert_logger:: Alert (uuid={alert_uuid}) len(alert.content): {len(alert.content)}')
+        #alert_content_dict = alert.content[0]
+        #logger.info(f'igwn_alert_logger:: Alert (uuid={alert_uuid}) alert_content_dict: {alert_content_dict.keys()}')
+        print()
+        parsed_schema = fastavro.parse_schema(alert.schema)
+        logger.info(f'igwn_alert_logger:: schema.fullname: {fastavro.schema.fullname(parsed_schema)}')
+
+        with open('/tmp/asdfasdf', 'wb') as out:
+            fastavro.writer(out, fastavro.schema.expand_schema(parsed_schema), alert.content)
+        print()
+    else:
+        logger.info(f'igwn_alert_logger:: Alert (uuid={alert_uuid}) *********************** not AveroBlob ***********************')
+
