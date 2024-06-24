@@ -39,7 +39,7 @@ gcn-kafka = ">=0.2,<0.4"
 hop-client = ">=0.8,<0.10"
 
 [tool.poetry.dev-dependencies]
-coverage = "^7.5.3"
+coverage = "^7.5.4"
 factory_boy = "^3.1.0"
 pytest = "^8.2.2"
 
