@@ -1056,19 +1056,20 @@ test = ["ci-watson (>=0.3.0)", "codecov", "pytest (>=4.6.0)", "pytest-astropy"]
 
 [[package]]
 name = "hop-client"
-version = "0.10.0"
+version = "0.10.1"
 description = "A pub-sub client library for Multi-messenger Astrophysics"
 optional = false
 python-versions = ">=3.6"
 files = [
-    {file = "hop-client-0.10.0.tar.gz", hash = "sha256:683216a48f784d518bb91ab11cc57e024c22e71782f90ed371422af8333e1d29"},
-    {file = "hop_client-0.10.0-py3-none-any.whl", hash = "sha256:5e1ddd279b35e85c6083f6187260f29c88261d31d26a13bc13943701371b1440"},
+    {file = "hop-client-0.10.1.tar.gz", hash = "sha256:daadf4b41ecb01ec77185b238782021dfa0ab0030472a33ac353b98fefd18cec"},
+    {file = "hop_client-0.10.1-py3-none-any.whl", hash = "sha256:73522b23370ed5f9f1e6ccca577219c3e037664739b61b473ffafcf3b92df062"},
 ]
 
 [package.dependencies]
 adc-streaming = ">=2.4.0"
 fastavro = ">=1.4.0"
 pluggy = ">=0.11"
+setuptools = ">=68.0"
 toml = ">=0.9.4"
 xmltodict = ">=0.9.0"
 
@@ -1926,6 +1927,26 @@ files = [
 [package.extras]
 dev = ["Django (>=1.11)", "check-manifest", "colorama (<=0.4.1)", "coverage", "flake8", "nose2", "readme-renderer (<25.0)", "tox", "wheel", "zest.releaser[recommended]"]
 doc = ["Sphinx", "sphinx-rtd-theme"]
+
+[[package]]
+name = "setuptools"
+version = "75.1.0"
+description = "Easily download, build, install, upgrade, and uninstall Python packages"
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "setuptools-75.1.0-py3-none-any.whl", hash = "sha256:35ab7fd3bcd95e6b7fd704e4a1539513edad446c097797f2985e0e4b960772f2"},
+    {file = "setuptools-75.1.0.tar.gz", hash = "sha256:d59a21b17a275fb872a9c3dae73963160ae079f1049ed956880cd7c09b120538"},
+]
+
+[package.extras]
+check = ["pytest-checkdocs (>=2.4)", "pytest-ruff (>=0.2.1)", "ruff (>=0.5.2)"]
+core = ["importlib-metadata (>=6)", "importlib-resources (>=5.10.2)", "jaraco.collections", "jaraco.functools", "jaraco.text (>=3.7)", "more-itertools", "more-itertools (>=8.8)", "packaging", "packaging (>=24)", "platformdirs (>=2.6.2)", "tomli (>=2.0.1)", "wheel (>=0.43.0)"]
+cover = ["pytest-cov"]
+doc = ["furo", "jaraco.packaging (>=9.3)", "jaraco.tidelift (>=1.4)", "pygments-github-lexers (==0.0.5)", "pyproject-hooks (!=1.1)", "rst.linker (>=1.9)", "sphinx (>=3.5)", "sphinx-favicon", "sphinx-inline-tabs", "sphinx-lint", "sphinx-notfound-page (>=1,<2)", "sphinx-reredirects", "sphinxcontrib-towncrier", "towncrier (<24.7)"]
+enabler = ["pytest-enabler (>=2.2)"]
+test = ["build[virtualenv] (>=1.0.3)", "filelock (>=3.4.0)", "ini2toml[lite] (>=0.14)", "jaraco.develop (>=7.21)", "jaraco.envs (>=2.2)", "jaraco.path (>=3.2.0)", "jaraco.test", "packaging (>=23.2)", "pip (>=19.1)", "pyproject-hooks (!=1.1)", "pytest (>=6,!=8.1.*)", "pytest-home (>=0.5)", "pytest-perf", "pytest-subprocess", "pytest-timeout", "pytest-xdist (>=3)", "tomli-w (>=1.0.0)", "virtualenv (>=13.0.0)", "wheel (>=0.44.0)"]
+type = ["importlib-metadata (>=7.0.2)", "jaraco.develop (>=7.21)", "mypy (==1.11.*)", "pytest-mypy"]
 
 [[package]]
 name = "six"
