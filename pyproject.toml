@@ -1,8 +1,14 @@
-[tool.poetry]
+[project]
 name = "tom-alertstreams"
-version = "0.6.3"
 description = "Reusable TOMToolkit app for listening to kafka streams."
-authors = ["TOM Toolkit Project <tomtoolkit@lco.global>", "Lindy Lindstrom <llindstrom@lco.global>"]
+authors = [
+    {name = "TOM Toolkit Project", email = "tomtoolkit-maintainers@lco.global"},
+    {name = "Lindy Lindstrom", email = "llindstrom@lco.global"}
+]
+maintainers = [
+    {name = "Joey Chatelain", email = "jchate6@gmail.com"},
+    {name = "William Lindstrom", email = "llindstrom@lco.global"},
+]
 license = "GPL-3.0-only"
 readme = "README.md"
 repository = "https://github.com/TOMToolkit/tom-alertstreams"
@@ -18,31 +24,55 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Astronomy",
     "Topic :: Scientific/Engineering :: Physics"
 ]
-
+dynamic = ["version"]
+requires-python = ">=3.9.0,<3.13"
 packages = [
     { include = "tom_alertstreams" }
 ]
+dependencies = [
+    "tomtoolkit >=2.22,<3.0",
+    "psycopg2-binary >=2.9,<3.0",
+    "gcn-kafka >=0.3,<1.0",
+    "hop-client >=0.10,<1.0"
+]
+
+[tool.poetry]
+version = "0.0.0" # version supplied by poetry-dynamic-versioning
 
 [tool.setuptools_scm]
 
-[tool.poetry.dependencies]
-python = ">=3.8,<3.12"
-tomtoolkit = "^2.10"
-psycopg2-binary = "^2.9"
-gcn-kafka = "^0.3"
-hop-client = "^0.10"
-
-[tool.poetry.dev-dependencies]
+[tool.poetry.group.test.dependencies]
 coverage = "^7.6.1"
 factory_boy = "^3.1.0"
 pytest = "^8.3.2"
 
+[tool.poetry.requires-plugins]
+poetry-dynamic-versioning = { version = ">=1.0.0,<2.0.0", extras = ["plugin"] }
+
+[tool.poetry-dynamic-versioning]
+enable = true
+vcs = "git"
+style = "pep440"
+# the default pattern regex makes the 'v' manditory
+# this pattern modifies the default regex in order to make the 'v' optional
+# ('v' becomes '[v]?' meaning a single v, [v], and ? means optional)
+pattern = "(?x)^[v]?((?P<epoch>\\d+)!)?(?P<base>\\d+(\\.\\d+)*)([-._]?((?P<stage>[a-zA-Z]+)[-._]?(?P<revision>\\d+)?))?(\\+(?P<tagged_metadata>.+))?$"
+
+# substitute version not only in pyproject.toml (which the config block above does)
+# but also the __version__.py file (using the default value of the files property).
+[tool.poetry-dynamic-versioning.substitution]
+
 [build-system]
-requires = ["poetry-core>=1.0.0", "setuptools>=45", "setuptools_scm[toml]>=6.2"]
+requires = [
+    "poetry-core>=1.0.0",
+    "setuptools>=45",
+    "setuptools_scm[toml]>=6.2",
+    "poetry-dynamic-versioning >=1.0.0, <2.0.0"]
 build-backend = "poetry.core.masonry.api"
