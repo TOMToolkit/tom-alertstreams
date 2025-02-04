@@ -43,11 +43,10 @@ dependencies = [
     "hop-client >=0.10,<1.0"
 ]
 
-[tool.poetry]
-version = "0.0.0" # version supplied by poetry-dynamic-versioning
-
 [tool.setuptools_scm]
 
+[tool.poetry]
+version = "0.0.0" # version supplied by poetry-dynamic-versioning
 [tool.poetry.group.test.dependencies]
 coverage = "^7.6.1"
 factory_boy = "^3.1.0"
@@ -72,7 +71,5 @@ pattern = "(?x)^[v]?((?P<epoch>\\d+)!)?(?P<base>\\d+(\\.\\d+)*)([-._]?((?P<stage
 [build-system]
 requires = [
     "poetry-core>=1.0.0",
-    "setuptools>=45",
-    "setuptools_scm[toml]>=6.2",
     "poetry-dynamic-versioning >=1.0.0, <2.0.0"]
 build-backend = "poetry.core.masonry.api"
