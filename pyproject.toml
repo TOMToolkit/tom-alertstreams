@@ -46,6 +46,9 @@ hopskotch = ["hop-client >=0.10,<1.0"]
 antares = ["antares-client"]
 babamul = ["babamul >=0.1,<1"]
 fink = ["fink-client >=8.8,<9"]
+ampel-ztf = ["ampel-ztf"]
+ampel-lsst = ["ampel-lsst"]
+ampel = ["ampel-ztf", "ampel-lsst"]
 
 all-streams = [
     "gcn-kafka >=0.3,<1.0",
@@ -53,6 +56,8 @@ all-streams = [
     "antares-client",
     "babamul >=0.1,<1",
     "fink-client >=8.8,<9",
+    "ampel-ztf",
+    "ampel-lsst",
 ]
 
 test = [
