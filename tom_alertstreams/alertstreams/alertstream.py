@@ -41,7 +41,8 @@ class NormalizedAlert(BaseModel):
         object_id: Astronomical object identifier (e.g. ZTF object name), if available.
         ra: Right ascension in decimal degrees, if available.
         dec: Declination in decimal degrees, if available.
-        magnitude: Apparent magnitude, if available.
+        magnitude: Apparent magnitude, if available. ZTF streams populate this field.
+        flux: Flux in nanojansky, if available. LSST streams populate this field.
         raw_payload: The full original alert as a plain dict for downstream use.
     """
     stream_name: str
@@ -52,6 +53,7 @@ class NormalizedAlert(BaseModel):
     ra: float | None = None
     dec: float | None = None
     magnitude: float | None = None
+    flux: float | None = None
     raw_payload: dict = {}
 
 
