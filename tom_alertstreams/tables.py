@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from typing import Any, ClassVar
 
 import django_filters
@@ -237,9 +238,31 @@ class LasairPresenter(AlertStreamPresenter):
         return f'{self.BASE_URL}/objects/{alert.object_id}/'
 
 
+class LsstPresenter(AlertStreamPresenter):
+    """Rubin Science Platform deep links via ADQL query API.
+
+    Constructs a URL that opens the RSP Portal with a pre-filled ADQL query
+    for the diaObject. Requires RSP login (CILogon) — unauthenticated users
+    are redirected to the login page, then to the query result.
+
+    The schema prefix (e.g. 'dp1') changes per Rubin data release.
+    """
+    BASE_URL: ClassVar[str] = 'https://data.lsst.cloud'
+    TAP_URL: ClassVar[str] = 'https://data.lsst.cloud/api/tap'
+    SCHEMA_PREFIX: ClassVar[str] = 'dp1'
+
+    def object_url(self, alert: Alert) -> str | None:
+        if not alert.object_id:
+            return None
+        adql = f'SELECT * FROM {self.SCHEMA_PREFIX}.DiaObject WHERE diaObjectId={alert.object_id}'
+        encoded_adql = urllib.parse.quote(adql)
+        return f'{self.BASE_URL}/portal/app/?api=tap&service={self.TAP_URL}&adql={encoded_adql}&execute=true'
+
+
 # Streams not listed here use the default AlertStreamPresenter (no URLs).
 STREAM_PRESENTERS: dict[str, type[AlertStreamPresenter]] = {
     'alerce': AlercePresenter,
+    'ampel-lsst': LsstPresenter,
     'antares': AntaresPresenter,
     'antares-ztf': AntaresPresenter,
     'antares-lsst': AntaresPresenter,
