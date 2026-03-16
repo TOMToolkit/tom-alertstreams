@@ -41,33 +41,25 @@ def _mjd_to_datetime(mjd: float) -> datetime:
 # ---------------------------------------------------------------------------
 
 class AntaresConfig(AlertStreamConfig):
-    """Pydantic configuration model for real ANTARES alert streams (ZTF and LSST).
+    """Pydantic configuration model for AntaresAlertStream.
 
     Inherits from AlertStreamConfig (a Pydantic BaseModel), so Pydantic validates
     that API_KEY and API_SECRET are present and raises descriptive errors if not.
-    Both AntaresZtfAlertStream and AntaresLsstAlertStream share this config because
-    they use the same StreamingClient, same Kafka auth, and same Locus model — the
-    only differences are topic names and normalize_alert() field extraction.
 
     Fields:
         API_KEY: ANTARES API key (required). Obtain at https://antares.noirlab.edu.
         API_SECRET: ANTARES API secret (required). Obtain at https://antares.noirlab.edu.
-        TOPIC_HANDLERS: Inherited from AlertStreamConfig. Maps topic names to handler
-            dotted-paths. Known ZTF topics: 'extragalactic_staging',
-            'nuclear_transient_staging'.
+        TOPIC_HANDLERS: Inherited from AlertStreamConfig. Maps ANTARES filter topic
+            names to handler dotted-paths. ANTARES topics are filter outputs, not
+            survey-specific — a single topic can carry both ZTF and LSST loci.
+            Known topics: 'extragalactic_staging', 'nuclear_transient_staging',
+            'in_shadow_virgo'. See the ANTARES tags page for the full list.
         GROUP: Kafka consumer group ID. Distinct group IDs let multiple TOM instances
             consume the same stream independently.
         SSL_CA_LOCATION: Path to a TLS Certificate Authority (CA) certificate file.
-            When StreamingClient connects to the ANTARES Kafka broker, it uses TLS
-            (encrypted connection). TLS requires a CA cert — a file that tells the
-            client "trust connections signed by this authority." The antares_client
-            package bundles a default CA cert (certificates/kafka-ca.pem) that works
-            for the current ZTF broker. If ANTARES uses a different Kafka cluster or
-            TLS chain for LSST alerts, the default cert might not be trusted, and
-            you'd need to point SSL_CA_LOCATION at the correct CA cert file.
+            The antares_client package bundles a default CA cert that works for the
+            current broker. Set this only if a different CA cert is needed.
             When None (the default), the bundled cert is used.
-            TODO: When researching LSST topic access, find out whether LSST topics
-            require a different CA cert and document how to obtain it.
         ENABLE_AUTO_COMMIT: Whether Kafka should auto-commit offsets. Set to False
             for at-least-once processing with manual offset management.
     """
@@ -157,26 +149,46 @@ class AntaresMockAlertStream(AlertStream):
 
 
 # ---------------------------------------------------------------------------
-# Real ANTARES streams — abstract base with ZTF and LSST subclasses
+# Real ANTARES stream — unified for all surveys (ZTF, LSST, etc.)
 # ---------------------------------------------------------------------------
 
 class AntaresAlertStream(AlertStream):
-    """Abstract base class for real ANTARES alert streams.
+    """ANTARES alert stream for ZTF, LSST, and future survey alerts.
 
-    Handles StreamingClient setup and the listen() loop. Not configured directly —
-    users configure AntaresZtfAlertStream or AntaresLsstAlertStream, which override
-    normalize_alert() for survey-specific field extraction.
-
-    ANTARES is unique among the LSST brokers: it presents a unified Kafka interface
-    for both ZTF and LSST alerts via the same StreamingClient and Locus model. The
-    only differences between surveys are topic names, properties dict keys, and
-    photometry units. This base class captures the shared listen() logic while
-    subclasses handle the divergent normalization.
+    ANTARES Kafka topics are filter outputs, not survey-specific — a single topic
+    like 'extragalactic_staging' can carry loci with ZTF data, LSST data, or both.
+    This class handles all surveys through a single normalize_alert() that extracts
+    whatever survey data is present on each locus.
 
     The StreamingClient is created inside listen() using a context manager (not in
     __init__) so the Kafka consumer is properly closed on errors or shutdown.
+
+    Known topics (from the ANTARES tags page at https://antares.noirlab.edu):
+        ZTF: 'extragalactic_staging', 'nuclear_transient_staging'
+        Mixed/LSST: 'in_shadow_virgo'
+    Topic names generally follow the pattern '{tag_name}_staging', though some
+    (like 'in_shadow_virgo') omit the suffix.
+
+    Configuration example (settings.py ALERT_STREAMS entry)::
+
+        {
+            'ACTIVE': True,
+            'NAME': 'tom_alertstreams.alertstreams.antares.AntaresAlertStream',
+            'OPTIONS': {
+                'API_KEY': os.environ.get('ANTARES_API_KEY', ''),
+                'API_SECRET': os.environ.get('ANTARES_API_SECRET', ''),
+                'TOPIC_HANDLERS': {
+                    # ZTF topics
+                    'extragalactic_staging': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database',
+                    'nuclear_transient_staging': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database',
+                    # LSST topics
+                    'in_shadow_virgo': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database',
+                },
+            },
+        }
     """
     configuration_class = AntaresConfig  # type: ignore[assignment]
+    STREAM_NAME: ClassVar[str] = 'antares'
 
     def listen(self) -> None:
         """Consume ANTARES loci and dispatch to configured topic handlers.
@@ -208,39 +220,16 @@ class AntaresAlertStream(AlertStream):
                 logger.info(f'{self.STREAM_NAME} received {locus.locus_id} on {base_topic}')
                 self.alert_handler[base_topic](locus, alert_stream=self, topic=base_topic)
 
-
-class AntaresZtfAlertStream(AntaresAlertStream):
-    """ANTARES alert stream for ZTF transient alerts.
-
-    Connects to ANTARES Kafka topics that carry ZTF-originated alerts. Each alert
-    is an antares_client Locus object enriched with ZTF-specific properties.
-
-    Known ZTF topics: 'extragalactic_staging', 'nuclear_transient_staging'.
-    Contact the ANTARES team for the full topic list.
-
-    Configuration example (settings.py ALERT_STREAMS entry):
-        {
-            'ACTIVE': True,
-            'NAME': 'tom_alertstreams.alertstreams.antares.AntaresZtfAlertStream',
-            'OPTIONS': {
-                'API_KEY': os.environ.get('ANTARES_API_KEY', ''),
-                'API_SECRET': os.environ.get('ANTARES_API_SECRET', ''),
-                'TOPIC_HANDLERS': {
-                    'extragalactic_staging': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database',
-                    'nuclear_transient_staging': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database',
-                },
-            },
-        }
-    """
-    STREAM_NAME: ClassVar[str] = 'antares-ztf'
-
     def normalize_alert(self, raw_alert: Any, topic: str = '') -> NormalizedAlert:
-        """Extract common fields from an ANTARES Locus object carrying ZTF data.
+        """Extract common fields from an ANTARES Locus object.
 
-        Field mappings (discovered via ex_antares.py introspection of a live ZTF locus):
-        - timestamp: locus.properties['newest_alert_observation_time'] (MJD float)
-        - magnitude: locus.properties['newest_alert_magnitude']
-        - object_id: locus.properties['ztf_object_id'] (distinct from locus_id)
+        Handles both ZTF and LSST data by extracting whatever survey-specific
+        properties are present on the locus. Field mappings discovered via
+        ex_antares_ztf.py and ex_antares_lsst.py introspection:
+
+        - timestamp: properties['newest_alert_observation_time'] (MJD float)
+        - magnitude: properties['newest_alert_magnitude'] (ANTARES-enriched)
+        - object_id: LSST dia_object_id (nested) → ZTF ztf_object_id (flat) → locus_id
         - alert_id: locus.locus_id (used by AntaresPresenter for locus page URL)
 
         The full Locus object is not JSON-serializable, so raw_payload is left empty.
@@ -251,22 +240,45 @@ class AntaresZtfAlertStream(AntaresAlertStream):
             topic: The ANTARES topic (e.g. 'extragalactic_staging').
 
         Returns:
-            NormalizedAlert with ZTF-specific fields populated.
+            NormalizedAlert with survey-appropriate fields populated.
         """
-        props = raw_alert.properties or {}
+        alert_properties = raw_alert.properties or {}
+
+        # Extract properties from the raw_alert for transfer to NormalizedAlert.
 
         # Timestamp from ANTARES-enriched locus property (MJD float).
         # This avoids lazy-loading locus.alerts, which triggers an HTTP API call.
-        mjd = props.get('newest_alert_observation_time')
+        mjd = alert_properties.get('newest_alert_observation_time')
         timestamp = _mjd_to_datetime(mjd) if mjd is not None else datetime.now(timezone.utc)
 
-        # ZTF magnitude from ANTARES-enriched properties.
-        magnitude = props.get('newest_alert_magnitude')
+        # Magnitude — ANTARES-enriched, populated for ZTF loci.
+        magnitude = alert_properties.get('newest_alert_magnitude')
 
-        # ZTF object ID if available; fallback to locus_id.
-        object_id = props.get('ztf_object_id', raw_alert.locus_id)
+        # Object ID — try LSST nested structure first, then ZTF flat property, then locus_id.
+        # ANTARES stores LSST IDs in a nested dict: properties['survey']['lsst']['dia_object_id'] → list
+        # ZTF IDs are a flat property: properties['ztf_object_id'] → str
+        object_id = raw_alert.locus_id  # fallback
+        survey = alert_properties.get('survey', {})
+        lsst_survey = survey.get('lsst', {}) if isinstance(survey, dict) else {}
+        dia_object_ids = lsst_survey.get('dia_object_id', [])
+        if dia_object_ids:
+            object_id = dia_object_ids[0]
+        elif alert_properties.get('ztf_object_id'):
+            object_id = alert_properties['ztf_object_id']
 
-        return NormalizedAlert(
+        # Flux — LSST uses flux (nanojansky) instead of magnitude.
+        # Property key TBD: no LSST-only locus observed from the stream yet.
+        # TODO: once the flux property key is known, extract it here.
+        flux = None
+
+        # Log LSST locus properties so we can discover the flux key from production data.
+        # Remove this logging once we've confirmed the flux property key and updated
+        # the extraction above.
+        if dia_object_ids:
+            logger.info(f'LSST locus detected: {raw_alert.locus_id} — '
+                        f'full properties: {alert_properties}')
+
+        normalized_alert = NormalizedAlert(
             stream_name=self.STREAM_NAME,
             topic=topic,
             timestamp=timestamp,
@@ -275,85 +287,7 @@ class AntaresZtfAlertStream(AntaresAlertStream):
             ra=float(raw_alert.ra) if raw_alert.ra is not None else None,
             dec=float(raw_alert.dec) if raw_alert.dec is not None else None,
             magnitude=float(magnitude) if magnitude is not None else None,
-            flux=None,
-            raw_payload={},
-        )
-
-
-class AntaresLsstAlertStream(AntaresAlertStream):
-    """ANTARES alert stream for LSST transient alerts.
-
-    Connects to ANTARES Kafka topics that carry LSST-originated alerts. ANTARES
-    is structurally ready for LSST — the Locus properties dict already contains
-    a 'survey.lsst' namespace with dia_object_id and ss_object_id arrays — but
-    LSST topic names and photometry property keys are not yet confirmed.
-
-    This class is provided for forward-compatibility. Activate it in settings once
-    LSST topics are available and property key names are confirmed via introspection.
-
-    Configuration example (settings.py ALERT_STREAMS entry):
-        {
-            'ACTIVE': False,  # activate once LSST topics are confirmed
-            'NAME': 'tom_alertstreams.alertstreams.antares.AntaresLsstAlertStream',
-            'OPTIONS': {
-                'API_KEY': os.environ.get('ANTARES_API_KEY', ''),
-                'API_SECRET': os.environ.get('ANTARES_API_SECRET', ''),
-                'TOPIC_HANDLERS': {
-                    'lsst_placeholder': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database',
-                },
-            },
-        }
-    """
-    STREAM_NAME: ClassVar[str] = 'antares-lsst'
-
-    def normalize_alert(self, raw_alert: Any, topic: str = '') -> NormalizedAlert:
-        """Extract common fields from an ANTARES Locus object carrying LSST data.
-
-        LSST-specific field mappings are provisional — based on the Locus properties
-        structure observed via ex_antares.py and the antares_client.search module:
-        - object_id: properties['survey']['lsst']['dia_object_id'][0] (nested dict)
-        - flux: property key TBD (need to inspect a real LSST locus)
-        - timestamp: properties['newest_alert_observation_time'] (same as ZTF)
-
-        TODO: Verify all LSST property keys by introspecting a real LSST locus once
-        LSST topics are available. Update this method accordingly.
-
-        Args:
-            raw_alert: An antares_client.models.Locus object.
-            topic: The ANTARES topic for LSST alerts.
-
-        Returns:
-            NormalizedAlert with LSST-specific fields populated where known.
-        """
-        props = raw_alert.properties or {}
-
-        # Timestamp — same MJD property as ZTF (ANTARES-enriched).
-        mjd = props.get('newest_alert_observation_time')
-        timestamp = _mjd_to_datetime(mjd) if mjd is not None else datetime.now(timezone.utc)
-
-        # LSST object ID from the nested survey dict structure.
-        # antares_client.search uses 'properties.survey.lsst.dia_object_id' as a
-        # flat key path, but the actual properties dict is nested:
-        # properties['survey']['lsst']['dia_object_id'] → list of IDs
-        object_id = raw_alert.locus_id  # default fallback
-        survey = props.get('survey', {})
-        lsst_survey = survey.get('lsst', {}) if isinstance(survey, dict) else {}
-        dia_object_ids = lsst_survey.get('dia_object_id', [])
-        if dia_object_ids:
-            object_id = dia_object_ids[0]
-
-        # LSST flux — property key TBD. Need to inspect a real LSST locus.
-        flux = None
-
-        return NormalizedAlert(
-            stream_name=self.STREAM_NAME,
-            topic=topic,
-            timestamp=timestamp,
-            alert_id=str(raw_alert.locus_id),
-            object_id=str(object_id),
-            ra=float(raw_alert.ra) if raw_alert.ra is not None else None,
-            dec=float(raw_alert.dec) if raw_alert.dec is not None else None,
-            magnitude=None,
             flux=flux,
             raw_payload={},
         )
+        return normalized_alert

@@ -264,8 +264,6 @@ STREAM_PRESENTERS: dict[str, type[AlertStreamPresenter]] = {
     'alerce': AlercePresenter,
     'ampel-lsst': LsstPresenter,
     'antares': AntaresPresenter,
-    'antares-ztf': AntaresPresenter,
-    'antares-lsst': AntaresPresenter,
     'babamul': BabamulPresenter,
     'fink': FinkPresenter,
     'gcn': GCNPresenter,

@@ -128,6 +128,104 @@ class NormalizedAlertTest(TestCase):
         self.assertEqual(d['raw_payload'], {'foo': 'bar'})
 
 
+class AntaresNormalizeAlertTest(TestCase):
+    """Tests for the unified AntaresAlertStream.normalize_alert() method.
+
+    Uses mock Locus objects to verify that normalize_alert() correctly handles
+    ZTF-only loci, LSST-only loci, cross-matched loci (both surveys), and bare
+    loci (neither survey ID present).
+    """
+
+    def setUp(self) -> None:
+        """Create an AntaresAlertStream instance with a minimal config."""
+        from tom_alertstreams.alertstreams.antares import AntaresAlertStream
+
+        self.stream = AntaresAlertStream(
+            API_KEY='fake-key',
+            API_SECRET='fake-secret',
+            TOPIC_HANDLERS={'test_topic': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database'},
+        )
+
+    def _make_mock_locus(
+        self,
+        locus_id: str = 'ANT2026test',
+        ra: float = 180.0,
+        dec: float = -30.0,
+        properties: dict | None = None,
+    ) -> MagicMock:
+        """Return a mock antares_client Locus object."""
+        locus = MagicMock()
+        locus.locus_id = locus_id
+        locus.ra = ra
+        locus.dec = dec
+        locus.properties = properties or {}
+        return locus
+
+    def test_ztf_locus_extracts_ztf_object_id(self) -> None:
+        """ZTF locus: object_id comes from properties['ztf_object_id']."""
+        locus = self._make_mock_locus(properties={
+            'newest_alert_observation_time': 60400.5,
+            'newest_alert_magnitude': 18.5,
+            'ztf_object_id': 'ZTF24aatest',
+            'survey': {'ztf': {'id': ['ZTF24aatest']}, 'lsst': {'dia_object_id': [], 'ss_object_id': []}},
+        })
+        result = self.stream.normalize_alert(locus, topic='extragalactic_staging')
+
+        self.assertEqual(result.object_id, 'ZTF24aatest')
+        self.assertEqual(result.magnitude, 18.5)
+        self.assertEqual(result.stream_name, 'antares')
+        self.assertEqual(result.topic, 'extragalactic_staging')
+
+    def test_lsst_locus_extracts_dia_object_id(self) -> None:
+        """LSST locus: object_id comes from survey.lsst.dia_object_id[0]."""
+        locus = self._make_mock_locus(properties={
+            'newest_alert_observation_time': 60400.5,
+            'newest_alert_magnitude': None,
+            'survey': {'ztf': {'id': []}, 'lsst': {'dia_object_id': ['170028527925067818'], 'ss_object_id': []}},
+        })
+        result = self.stream.normalize_alert(locus, topic='in_shadow_virgo')
+
+        self.assertEqual(result.object_id, '170028527925067818')
+
+    def test_cross_matched_locus_prefers_lsst_object_id(self) -> None:
+        """Cross-matched locus: LSST dia_object_id takes priority over ZTF ztf_object_id."""
+        locus = self._make_mock_locus(properties={
+            'newest_alert_observation_time': 60400.5,
+            'newest_alert_magnitude': 19.0,
+            'ztf_object_id': 'ZTF24aatest',
+            'survey': {
+                'ztf': {'id': ['ZTF24aatest']},
+                'lsst': {'dia_object_id': ['170028527925067818'], 'ss_object_id': []},
+            },
+        })
+        result = self.stream.normalize_alert(locus, topic='extragalactic_staging')
+
+        self.assertEqual(result.object_id, '170028527925067818')
+        # Magnitude should still be extracted even though LSST object_id was preferred
+        self.assertEqual(result.magnitude, 19.0)
+
+    def test_bare_locus_falls_back_to_locus_id(self) -> None:
+        """Bare locus (no ZTF or LSST object ID): falls back to locus_id."""
+        locus = self._make_mock_locus(locus_id='ANT2026bare', properties={
+            'newest_alert_observation_time': 60400.5,
+            'survey': {'ztf': {'id': []}, 'lsst': {'dia_object_id': [], 'ss_object_id': []}},
+        })
+        result = self.stream.normalize_alert(locus, topic='test_topic')
+
+        self.assertEqual(result.object_id, 'ANT2026bare')
+        self.assertEqual(result.alert_id, 'ANT2026bare')
+
+    def test_missing_timestamp_defaults_to_now(self) -> None:
+        """Missing newest_alert_observation_time defaults to current UTC time."""
+        locus = self._make_mock_locus(properties={})
+        result = self.stream.normalize_alert(locus)
+
+        self.assertIsNotNone(result.timestamp)
+        # Should be within the last few seconds
+        delta = (datetime.now(timezone.utc) - result.timestamp).total_seconds()
+        self.assertLess(abs(delta), 5)
+
+
 class SaveAlertToDatabaseTest(TestCase):
     """Tests for the save_alert_to_database handler."""
 
