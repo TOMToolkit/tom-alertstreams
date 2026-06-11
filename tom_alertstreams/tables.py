@@ -219,26 +219,49 @@ class BabamulPresenter(AlertStreamPresenter):
 
 
 class FinkPresenter(AlertStreamPresenter):
-    """Fink object pages: https://fink-portal.org/{object_id}"""
-    BASE_URL = 'https://fink-portal.org'
+    """Fink object pages, survey-aware by topic suffix.
+
+    Fink runs separate web portals per survey on per-survey subdomains, and
+    topics follow the '<filter>_<survey>' convention, so the topic suffix selects
+    the host:
+        ZTF:  https://ztf.fink-portal.org/{object_id}
+        LSST: https://lsst.fink-portal.org/{object_id}
+
+    Links the object (object_id), matching the other portal presenters
+    (Alerce/Babamul/Lasair). An unrecognized topic suffix yields no link.
+    """
+    ZTF_BASE_URL: ClassVar[str] = 'https://ztf.fink-portal.org'
+    LSST_BASE_URL: ClassVar[str] = 'https://lsst.fink-portal.org'
 
     def object_url(self, alert: Alert) -> str | None:
         if not alert.object_id:
             return None
-        return f'{self.BASE_URL}/{alert.object_id}'
+        if alert.topic.endswith('_ztf'):
+            return f'{self.ZTF_BASE_URL}/{alert.object_id}'
+        if alert.topic.endswith('_lsst'):
+            return f'{self.LSST_BASE_URL}/{alert.object_id}'
+        logger.warning('FinkPresenter: unrecognized topic suffix: %s', alert.topic)
+        return None
 
 
 class GCNPresenter(AlertStreamPresenter):
-    """GCN circular pages: https://gcn.nasa.gov/circulars/{alert_id}"""
+    """GCN circular pages: https://gcn.nasa.gov/circulars/{circularId}
+
+    Only the gcn.circulars topic maps to a circulars page (where alert_id is the
+    circularId). Other GCN topics (heartbeat, notices) have no such URL, so they get
+    no link rather than a broken /circulars/<non-id> one.
+    """
     BASE_URL = 'https://gcn.nasa.gov'
 
     def alert_url(self, alert: Alert) -> str | None:
-        return f'{self.BASE_URL}/circulars/{alert.alert_id}'
+        if alert.topic == 'gcn.circulars':
+            return f'{self.BASE_URL}/circulars/{alert.alert_id}'
+        return None
 
 
 class LasairPresenter(AlertStreamPresenter):
-    """Lasair object pages: https://lasair-ztf.lsst.ac.uk/objects/{object_id}/"""
-    BASE_URL = 'https://lasair-ztf.lsst.ac.uk'
+    """Lasair object pages: https://lasair.lsst.ac.uk/objects/{object_id}/"""
+    BASE_URL = 'https://lasair.lsst.ac.uk'
 
     def object_url(self, alert: Alert) -> str | None:
         if not alert.object_id:
