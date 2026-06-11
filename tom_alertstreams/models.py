@@ -88,14 +88,32 @@ class Alert(FIFOQueueMixin):
 
     stream_name = models.CharField(max_length=100, db_index=True)
     topic = models.CharField(max_length=200)
-    timestamp = models.DateTimeField(db_index=True)
+
+    # When the telescope observed the source the alert is about (a detection time).
+    # Nullable: some alerts (e.g. GCN Circulars) are not about a single observation.
+    observation_time = models.DateTimeField(null=True, db_index=True)
+
+    # When the broker/survey issued/published the alert (e.g. GCN Circular createdOn,
+    # Fink brokerEndProcessTimestamp). Nullable: not every stream exposes it. The gap
+    # between observation_time and published_time is the broker's processing latency.
+    published_time = models.DateTimeField(null=True)
+
     alert_id = models.CharField(max_length=200)
     object_id = models.CharField(max_length=200, blank=True, null=True)
     ra = models.FloatField(null=True)
     dec = models.FloatField(null=True)
     magnitude = models.FloatField(null=True)
     flux = models.FloatField(null=True)
+
     raw_payload = models.JSONField(default=dict)
+
+    # When the row was received and saved — our receipt clock, distinct from
+    # `observation_time` (when observed) and `published_time` (when the broker issued
+    # it). Observation/publish times can be stale or backlogged, so `created` is what
+    # answers "is this stream still ingesting?" — and it drives ordering + the FIFO.
+    # Nullable so the column could be added while a running readstreams (old model) was
+    # still inserting; every new row sets it via auto_now_add.
+    created = models.DateTimeField(auto_now_add=True, null=True, db_index=True)
 
     class Meta(FIFOQueueMixin.Meta):  # this is the way you subclass the internal Meta class
         abstract = False  # override for the concrete model (abstract is True in the super)
