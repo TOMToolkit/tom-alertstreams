@@ -45,14 +45,22 @@ class AlertTable(HTMXTable):
     #
 
     stream_name = tables.Column(verbose_name='Stream')  # sets the column header value
+    # Two-word headers so these time columns wrap rather than stretch the table wide.
+    observation_time = tables.Column(verbose_name='Observation Time')
+    published_time = tables.Column(verbose_name='Published Time')
 
     # render_FIELDNAME() methods are called automatically when present
-    def render_timestamp(self, value: Any) -> str:
-        """Render timestamp in unambiguous UTC 24-hour format.
+    def render_observation_time(self, value: Any) -> str:
+        """Render the observation time in UTC 24-hour format (blank if absent).
 
-        The result looks like this: 2026-03-05 18:51:30 UTC
+        The result looks like this: 2026-03-05 18:51:30 UTC. Blank for alerts with no
+        observation (e.g. GCN Circulars).
         """
-        return value.strftime('%Y-%m-%d %H:%M:%S UTC')
+        return value.strftime('%Y-%m-%d %H:%M:%S UTC') if value else ''
+
+    def render_published_time(self, value: Any) -> str:
+        """Render the broker/survey publish time in UTC 24-hour format (blank if absent)."""
+        return value.strftime('%Y-%m-%d %H:%M:%S UTC') if value else ''
 
     def render_alert_id(self, record: Alert, value: str) -> str:
         """Render alert_id as a hyperlink if the stream's presenter provides a URL."""
@@ -93,8 +101,8 @@ class AlertTable(HTMXTable):
     class Meta(HTMXTable.Meta):
         model = Alert
         fields = [
-            'selection', 'alert_id', 'stream_name', 'topic', 'timestamp',
-            'object_id', 'ra', 'dec', 'magnitude', 'flux',
+            'selection', 'alert_id', 'stream_name', 'topic', 'published_time',
+            'observation_time', 'object_id', 'ra', 'dec', 'magnitude', 'flux',
         ]
 
 
