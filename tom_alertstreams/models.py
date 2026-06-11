@@ -116,9 +116,15 @@ class Alert(FIFOQueueMixin):
     created = models.DateTimeField(auto_now_add=True, null=True, db_index=True)
 
     class Meta(FIFOQueueMixin.Meta):  # this is the way you subclass the internal Meta class
-        abstract = False  # override for the concrete model (abstract is True in the super)
-        ordering = ['-timestamp']
-        indexes = [models.Index(fields=['stream_name', 'timestamp'])]
+
+        # in the FIFOQueueMixin.Meta, abstract is True,
+        abstract = False  # here, in the concrete model, we're not abstract.
+
+        ordering = ['-created']  # most recently received
+
+        # speed up the HTMX filtering
+        indexes = [models.Index(fields=['stream_name', 'topic', 'observation_time'])]
 
     def __str__(self) -> str:
-        return f'Alert {self.alert_id} from {self.stream_name} at {self.timestamp}'
+        return (f'Alert {self.alert_id} received from {self.stream_name} on topic {self.topic} '
+                f'at {self.created}')
