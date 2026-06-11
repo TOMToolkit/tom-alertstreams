@@ -187,6 +187,24 @@ class AlertFilterSet(HTMXTableFilterSet):
         topics = qs.values_list('topic', flat=True).distinct().order_by('topic')
         self.filters['topic'].extra['choices'] = [(t, t) for t in topics]
 
+    @property
+    def form(self):
+        """Lay the three controls out on one row instead of an 'Advanced' collapse.
+
+        HTMXTableFilterSet.form builds a crispy layout that keeps only General Search
+        visible and hides Stream/Topic behind an 'Advanced ›' Bootstrap collapse. We
+        replace that layout with a flat Row so all three controls are always visible.
+        """
+        form = super().form  # builds and caches self._form with the base (collapse) layout
+        form.helper.layout = Layout(
+            Row(
+                Column('query', css_class='col-md-4'),
+                Column('stream_name', css_class='col-md-4'),
+                Column('topic', css_class='col-md-4'),
+            )
+        )
+        return form
+
     def general_search(self, queryset: Any, name: str, value: str) -> Any:
         """Search only the meaningful text columns (overrides the slow base default).
 
