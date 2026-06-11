@@ -4,9 +4,11 @@ import logging
 import urllib.parse
 from typing import Any, ClassVar
 
+from crispy_forms.layout import Column, Layout, Row
 import django_filters
 import django_tables2 as tables
 from django import forms
+from django.db.models import Q
 from django.utils.html import format_html
 
 from tom_alertstreams.alertstreams.alertstream import get_alert_stream_classes
@@ -133,8 +135,13 @@ class AlertFilterSet(HTMXTableFilterSet):
 
     Provides a 'query' full-text search (inherited from HTMXTableFilterSet) plus
     the fields defined here, which appear in the Advanced> expansion of the form.
+
+    Implements the HTMX "cascading select" pattern: the topic dropdown choices
+    are scoped to the currently selected stream. See __init__ for the dynamic
+    choice logic and recent_alerts.html for the HTMX trigger that refreshes
+    the topic <select> when the stream changes.
     """
-    # these are the fields that appear in the Advanced> expansion
+    # Stream filter — choices from settings.ALERT_STREAMS active entries
     stream_name = django_filters.ChoiceFilter(
         field_name='stream_name',
         label='Stream',
@@ -150,9 +157,56 @@ class AlertFilterSet(HTMXTableFilterSet):
         }),
     )
 
+    # Topic filter — choices are populated dynamically in __init__ based on the
+    # selected stream_name, implementing the "cascading select" pattern. When no
+    # stream is selected, shows all topics across all streams.
+    topic = django_filters.ChoiceFilter(
+        field_name='topic',
+        label='Topic',
+        empty_label='All topics',
+        choices=[],  # populated dynamically in __init__ from the database
+        widget=forms.Select(attrs={
+            'hx-get': '',
+            'hx-trigger': 'change',
+            'hx-target': 'div.table-container',
+            'hx-swap': 'innerHTML',
+            'hx-indicator': '.progress',
+            'hx-include': 'closest form',
+        }),
+    )
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Cascading select: scope topic choices to the currently selected stream.
+        # On first load (no stream selected), show all distinct topics in the DB.
+        # This runs at form-render time so choices stay current without restart.
+        stream_name = self.data.get('stream_name', '') if self.data else ''
+        qs = Alert.objects.all()
+        if stream_name:
+            qs = qs.filter(stream_name=stream_name)
+        topics = qs.values_list('topic', flat=True).distinct().order_by('topic')
+        self.filters['topic'].extra['choices'] = [(t, t) for t in topics]
+
+    def general_search(self, queryset: Any, name: str, value: str) -> Any:
+        """Search only the meaningful text columns (overrides the slow base default).
+
+        HTMXTableFilterSet.general_search icontains-es EVERY model field, including the
+        large raw_payload JSONField and the numeric/datetime columns, which makes the
+        General Search several times slower than it needs to be. Restrict it to the
+        columns a user would actually search by.
+        """
+        if not value:
+            return queryset
+        return queryset.filter(
+            Q(stream_name__icontains=value)
+            | Q(topic__icontains=value)
+            | Q(alert_id__icontains=value)
+            | Q(object_id__icontains=value)
+        )
+
     class Meta:
         model = Alert
-        fields = ['stream_name']
+        fields = ['stream_name', 'topic']
 
 
 # ---------------------------------------------------------------------------
