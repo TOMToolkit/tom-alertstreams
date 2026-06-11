@@ -5,11 +5,13 @@
 <p class="text-muted mb-2">Time since last alert received:</p>
 <div style="display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid #dee2e6; border-left: 1px solid #dee2e6;" class="mb-3">
     {% for s in stream_status %}
-    <div class="d-flex justify-content-between py-2 px-3" style="border-right: 1px solid #dee2e6; border-bottom: 1px solid #dee2e6;">
-        <strong>{{ s.stream_name }}</strong>
+    {# Mock/stub streams (IS_MOCK) get a shaded cell + a (mock) label so it's clear the #}
+    {# data is generated, not from a real broker. #}
+    <div class="d-flex justify-content-between py-2 px-3" style="border-right: 1px solid #dee2e6; border-bottom: 1px solid #dee2e6;{% if s.is_mock %} background-color: #e6e6e6;{% endif %}">
+        <span><strong>{{ s.stream_name }}</strong>{% if s.is_mock %} <small class="text-muted">(mock)</small>{% endif %}</span>
         <span>
-        {% if s.latest_timestamp %}
-            {{ s.latest_timestamp|timesince:s.now }} ago
+        {% if s.latest_received %}
+            {{ s.latest_received|timesince:s.now }} ago
         {% else %}
             No alerts
         {% endif %}
