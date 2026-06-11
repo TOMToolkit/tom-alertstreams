@@ -113,8 +113,19 @@ def _get_stream_name_choices() -> list[tuple[str, str]]:
     effect without restarting the process. Returns a list of (value, label)
     tuples using each stream's STREAM_NAME. Streams that fail to import are
     silently skipped so a misconfigured entry doesn't break the filter form.
+
+    Deduped by STREAM_NAME: a broker may be configured as several ALERT_STREAMS
+    entries that share a name (Pitt-Google runs one entry per Pub/Sub topic, all
+    'pittgoogle'), and the dropdown should show one choice per stream.
     """
-    return [(klass.STREAM_NAME, klass.STREAM_NAME) for klass in get_alert_stream_classes()]
+    seen: set[str] = set()
+    choices: list[tuple[str, str]] = []
+    for klass in get_alert_stream_classes():
+        if klass.STREAM_NAME in seen:
+            continue
+        seen.add(klass.STREAM_NAME)
+        choices.append((klass.STREAM_NAME, klass.STREAM_NAME))
+    return choices
 
 
 class AlertFilterSet(HTMXTableFilterSet):
