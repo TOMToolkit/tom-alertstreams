@@ -45,19 +45,21 @@ gcn = ["gcn-kafka >=0.3,<1.0"]
 hopskotch = ["hop-client >=0.10,<1.0"]
 antares = ["antares-client"]
 babamul = ["babamul >=0.1,<1"]
-fink = ["fink-client >=8.8,<9"]
+fink = ["fink-client >=11.0,<12"]
 ampel-ztf = ["ampel-ztf"]
 ampel-lsst = ["ampel-lsst"]
 ampel = ["ampel-ztf", "ampel-lsst"]
+pittgoogle = ["pittgoogle-client >=0.3.22,<1.0"]
 
 all-streams = [
     "gcn-kafka >=0.3,<1.0",
     "hop-client >=0.10,<1.0",
     "antares-client",
     "babamul >=0.1,<1",
-    "fink-client >=8.8,<9",
+    "fink-client >=11.0,<12",
     "ampel-ztf",
     "ampel-lsst",
+    "pittgoogle-client >=0.3.22,<1.0"
 ]
 
 test = [

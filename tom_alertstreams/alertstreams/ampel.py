@@ -18,7 +18,9 @@ from typing import Any, ClassVar, Literal
 # from ampel.ztf.alert.ZiAlertSupplier import ZiAlertSupplier
 # from ampel.ztf.t0.load.UWAlertLoader import UWAlertLoader
 
-from tom_alertstreams.alertstreams.alertstream import AlertStream, AlertStreamConfig, NormalizedAlert
+from tom_alertstreams.alertstreams.alertstream import (
+    AlertStream, AlertStreamConfig, NormalizedAlert, _jd_to_datetime, _mjd_to_datetime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,29 +29,8 @@ logger = logging.getLogger(__name__)
 _MOCK_RA = 0.0
 _MOCK_DEC = 0.0
 _MOCK_MAGNITUDE = 99.0
-INTER_ALERT_SLEEP_MIN = 360  # six minutes
-INTER_ALERT_SLEEP_MAX = 420  # seven minutes
-
-
-# ---------------------------------------------------------------------------
-# Julian Date helpers
-# ---------------------------------------------------------------------------
-
-def _jd_to_datetime(jd: float) -> datetime:
-    """Convert Julian Date to a timezone-aware UTC datetime.
-
-    Uses the standard epoch offset: JD 2440587.5 = Unix epoch (1970-01-01 00:00:00 UTC).
-    """
-    unix_seconds = (jd - 2440587.5) * 86400.0
-    return datetime.fromtimestamp(unix_seconds, tz=timezone.utc)
-
-
-def _mjd_to_datetime(mjd: float) -> datetime:
-    """Convert Modified Julian Date to a timezone-aware UTC datetime.
-
-    MJD = JD - 2400000.5, so we convert back to JD and delegate.
-    """
-    return _jd_to_datetime(mjd + 2400000.5)
+INTER_ALERT_SLEEP_MIN = 3600  # sixty minutes
+INTER_ALERT_SLEEP_MAX = 3600
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +55,7 @@ class AmpelMockAlertStream(AlertStream):
     """
     configuration_class = AmpelMockConfig  # type: ignore[assignment]
     STREAM_NAME: ClassVar[str] = 'ampel'
+    IS_MOCK: ClassVar[bool] = True
 
     def normalize_alert(self, raw_alert: dict, topic: str = '') -> NormalizedAlert:
         """Map a mock AMPEL alert dict to a NormalizedAlert.
@@ -88,7 +70,8 @@ class AmpelMockAlertStream(AlertStream):
         return NormalizedAlert(
             stream_name=self.STREAM_NAME,
             topic=topic or raw_alert.get('topic', ''),
-            timestamp=datetime.fromisoformat(raw_alert['timestamp']),
+            observation_time=None,  # a mock alert has no real observation
+            published_time=datetime.fromisoformat(raw_alert['timestamp']),
             alert_id=raw_alert['alert_id'],
             object_id=raw_alert.get('object_id'),
             ra=raw_alert.get('ra'),
@@ -186,7 +169,8 @@ class AmpelZtfAlertStream(AlertStream):
         return NormalizedAlert(
             stream_name=self.STREAM_NAME,
             topic=topic,
-            timestamp=_jd_to_datetime(candidate['jd']),
+            observation_time=_jd_to_datetime(candidate['jd']),
+            published_time=None,
             alert_id=str(alert.id),
             object_id=alert.extra.get('name') if alert.extra else None,
             ra=candidate.get('ra'),
@@ -320,7 +304,8 @@ class AmpelLsstAlertStream(AlertStream):
         return NormalizedAlert(
             stream_name=self.STREAM_NAME,
             topic=topic or kafka_topic,
-            timestamp=_mjd_to_datetime(dia_source['midpointMjdTai']),
+            observation_time=_mjd_to_datetime(dia_source['midpointMjdTai']),
+            published_time=None,
             alert_id=str(alert.id),
             object_id=str(alert.stock),
             ra=dia_source.get('ra'),

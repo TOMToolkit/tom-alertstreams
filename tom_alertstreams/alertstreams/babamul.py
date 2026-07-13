@@ -64,7 +64,8 @@ class BabamulAlertStream(AlertStream):
         return NormalizedAlert(
             stream_name=self.STREAM_NAME,
             topic=topic or raw_alert.topic or '',
-            timestamp=candidate.datetime,
+            observation_time=candidate.datetime,
+            published_time=None,
             alert_id=str(raw_alert.candid),
             object_id=raw_alert.objectId,
             ra=candidate.ra,
@@ -77,8 +78,14 @@ class BabamulAlertStream(AlertStream):
         """Consume Babamul alerts and dispatch to configured topic handlers.
 
         Opens a babamul AlertConsumer as a context manager and iterates over
-        incoming alerts indefinitely. Each alert is dispatched to the handler
-        configured for its topic.
+        incoming alerts. Each alert is dispatched to the handler for its topic.
+
+        babamul raises on a dropped/unreachable broker (BabamulConnectionError),
+        a SASL failure (AuthenticationError), or a bad message (DeserializationError)
+        — all from inside the `for alert in consumer:` iteration. We let those
+        propagate: AlertStream.run() supervises listen() and reconnects after a
+        backoff, so connection resilience lives once in the base class rather than
+        being re-implemented per broker.
         """
         topics = list(self.config.TOPIC_HANDLERS.keys())
 

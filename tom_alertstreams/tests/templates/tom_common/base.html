@@ -1,0 +1,9 @@
+{# Minimal stand-in for tom_common/base.html used only by the test harness.       #}
+{# It lets the Recent Alerts view render in tests without pulling the full TOM     #}
+{# stack (tom_common, navbar, auth, bootstrap chrome) into boot_django. Only the   #}
+{# blocks the page actually overrides (title, content) need to exist here.         #}
+<!DOCTYPE html>
+<html lang="en">
+<head><title>{% block title %}{% endblock %}</title></head>
+<body>{% block content %}{% endblock %}</body>
+</html>

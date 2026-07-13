@@ -27,6 +27,16 @@
             {% crispy filter.form %}
         </form>
 
+        {# Cascading select: update topic choices when stream changes.             #}
+        {# Fires only on user interaction with stream_name, not on the 5-second    #}
+        {# auto-poll, so it won't close the dropdown if the user is mid-selection. #}
+        <div hx-get="{% url 'alertstreams:topic-choices' %}"
+             hx-trigger="change from:#id_stream_name"
+             hx-target="#id_topic"
+             hx-swap="innerHTML"
+             hx-include="#id_stream_name">
+        </div>
+
         {# Progress indicator (CSS provided by TOM Toolkit base template) #}
         <div class="progress">
             <div class="indeterminate"></div>

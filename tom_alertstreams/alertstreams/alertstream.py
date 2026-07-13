@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import abc
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from typing import Any, Callable, ClassVar
 
 from django.conf import settings
@@ -18,6 +19,64 @@ logger.setLevel(logging.DEBUG)
 
 
 # ---------------------------------------------------------------------------
+# Julian Date / MJD helpers — shared across multiple alert stream modules
+# ---------------------------------------------------------------------------
+
+def _jd_to_datetime(jd: float) -> datetime:
+    """Convert Julian Date to a timezone-aware UTC datetime.
+
+    Uses the standard epoch offset: JD 2440587.5 = Unix epoch (1970-01-01 00:00:00 UTC).
+    """
+    unix_seconds = (jd - 2440587.5) * 86400.0
+    return datetime.fromtimestamp(unix_seconds, tz=timezone.utc)
+
+
+def _mjd_to_datetime(mjd: float) -> datetime:
+    """Convert Modified Julian Date to a timezone-aware UTC datetime.
+
+    MJD = JD - 2400000.5, so we convert back to JD and delegate.
+    """
+    return _jd_to_datetime(mjd + 2400000.5)
+
+
+def is_in_hourly_window(timestamp_ms: int) -> bool:
+    """Return True if timestamp_ms falls in the first second of its UTC hour.
+
+    A stateless once-per-hour throttle for high-frequency feeds. UTC hour boundaries
+    are exact multiples of 3_600_000 ms, so (timestamp_ms % 3_600_000) is the offset
+    into the current hour; < 1000 ms keeps just the one message in the hour's first
+    second. Used to thin firehose streams — GCN's ~1/sec heartbeat and Pitt-Google's
+    ~1/sec ztf-loop — down to a single saved alert per hour.
+
+    Args:
+        timestamp_ms: A Unix-epoch timestamp in milliseconds (e.g. a Kafka message
+            timestamp or a Pub/Sub publishTime converted to ms).
+
+    Returns:
+        True if the timestamp is within the first 1000 ms of its UTC hour.
+    """
+    return timestamp_ms % 3_600_000 < 1000
+
+
+def is_in_minute_window(timestamp_ms: int) -> bool:
+    """Return True if timestamp_ms falls in the first second of its UTC minute.
+
+    The per-minute analogue of is_in_hourly_window — a stateless once-per-minute throttle.
+    UTC minute boundaries are exact multiples of 60_000 ms, so (timestamp_ms % 60_000) is the
+    offset into the current minute; < 1000 ms keeps the one message in the minute's first
+    second. Thins a high-rate feed (Pitt-Google's ztf-loop / ztf-alerts) to ~1/min — a livelier
+    demo cadence than hourly, while still keeping acks fast enough to stay current.
+
+    Args:
+        timestamp_ms: A Unix-epoch timestamp in milliseconds.
+
+    Returns:
+        True if the timestamp is within the first 1000 ms of its UTC minute.
+    """
+    return timestamp_ms % 60_000 < 1000
+
+
+# ---------------------------------------------------------------------------
 # Typed alert intermediate
 # ---------------------------------------------------------------------------
 
@@ -28,16 +87,26 @@ class NormalizedAlert(BaseModel):
     Handlers that need to persist alerts (e.g. save_alert_to_database) rely on this
     type so that one handler function works across all streams.
 
-    All fields except stream_name, alert_id, and timestamp are optional because
+    Only stream_name and alert_id are required; every other field is optional because
     not every stream provides the same metadata. The raw_payload preserves the full
     original alert object (serialized to a dict) for handlers that need
     stream-specific data not captured in the normalised fields.
 
+    Three distinct clocks (all UTC), any of which may be absent for a given stream:
+        observation_time: when the telescope observed the source the alert is about
+            (e.g. a detection MJD/JD). Absent for non-observational alerts such as GCN
+            Circulars.
+        published_time: when the alert was issued/published by the broker or survey
+            (e.g. GCN Circular createdOn, Fink brokerEndProcessTimestamp). Distinct
+            from observation_time — the gap is the broker's processing latency.
+        (receipt time is the Alert.created column, set when we save the row.)
+
     Fields:
         stream_name: Short canonical name of the stream (from AlertStream.STREAM_NAME).
-        topic: Kafka topic the alert arrived on. Empty string if not available.
-        timestamp: UTC datetime of the alert. Defaults to an empty string if unknown.
         alert_id: Stream-specific identifier for this alert.
+        topic: Kafka topic the alert arrived on. Empty string if not available.
+        observation_time: UTC observation datetime, if available.
+        published_time: UTC datetime the alert was issued by the broker/survey, if available.
         object_id: Astronomical object identifier (e.g. ZTF object name), if available.
         ra: Right ascension in decimal degrees, if available.
         dec: Declination in decimal degrees, if available.
@@ -47,8 +116,9 @@ class NormalizedAlert(BaseModel):
     """
     stream_name: str
     alert_id: str
-    timestamp: datetime
     topic: str = ''
+    observation_time: datetime | None = None
+    published_time: datetime | None = None
     object_id: str | None = None
     ra: float | None = None
     dec: float | None = None
@@ -132,6 +202,16 @@ class AlertStream(abc.ABC):
     # look up the appropriate AlertStreamPresenter for URL construction.
     STREAM_NAME: ClassVar[str]
 
+    # True on mock/stub streams that generate simulated demo alerts (rather than
+    # connecting to the real broker). The dashboard uses this to indicate visually
+    # streams that aren't showing real data.
+    IS_MOCK: ClassVar[bool] = False
+
+    # Seconds run() waits before restarting listen() after it returns or raises.
+    # This is the reconnect backoff shared by every stream; a subclass may override
+    # it for a broker that needs a longer delay between connection attempts.
+    RESTART_DELAY_SECONDS: ClassVar[float] = 30.0
+
     def __init__(self, **kwargs: Any) -> None:
         # read and validate the alertstream configuration
         self.config: AlertStreamConfig = self.configuration_class(**kwargs)
@@ -211,9 +291,15 @@ class AlertStream(abc.ABC):
 
     @abc.abstractmethod
     def listen(self) -> None:
-        """Consume alerts from the stream indefinitely.
+        """Consume alerts for a single connect-and-consume session.
 
-        This method is not expected to return. Implementations should:
+        In normal operation this method does not return — it connects once and
+        consumes indefinitely. It IS, however, allowed to raise on a broker drop,
+        auth failure, deserialization error, etc.: run() supervises listen() and
+        restarts it after a backoff, so implementations should NOT add their own
+        reconnect/restart loops. Connection resilience lives once, in run().
+
+        Implementations should:
           1. Connect to the Kafka stream using credentials from self.config
           2. Subscribe to the topics in self.config.TOPIC_HANDLERS (the topic
              keys are also available via self.alert_handler.keys())
@@ -233,7 +319,34 @@ class AlertStream(abc.ABC):
 
           Handlers absorb extras they do not need via **kwargs.
         """
-        pass # implement me
+        pass  # implement me in your subclass
+
+    def run(self) -> None:
+        """Supervise listen(), restarting it forever so a stream can't die silently.
+
+        readstreams launches this (not listen() directly) in one thread per stream.
+        Because each listen() runs in a bare Thread with no restart, an exception that
+        escapes listen() would otherwise kill that one stream permanently — and
+        silently — while the other streams keep running.
+
+        This wrapper logs any failure and restarts listen() after RESTART_DELAY_SECONDS,
+        giving every stream automatic reconnect-on-error for free. Only Exception is
+        caught, so KeyboardInterrupt / SystemExit still propagate for a clean shutdown.
+        """
+        while True:
+            try:
+                self.listen()
+                # listen() is documented as not returning in normal operation; if it
+                # does, the session ended (e.g. the consumer was closed) — restart it.
+                logger.warning(
+                    f'{self.STREAM_NAME}: listen() returned; restarting in {self.RESTART_DELAY_SECONDS}s.'
+                )
+            except Exception as exc:
+                logger.exception(
+                    f'{self.STREAM_NAME}: listen() failed ({exc.__class__.__name__}: {exc}); '
+                    f'restarting in {self.RESTART_DELAY_SECONDS}s.'
+                )
+            time.sleep(self.RESTART_DELAY_SECONDS)
 
 
 # ---------------------------------------------------------------------------

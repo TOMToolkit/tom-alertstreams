@@ -33,9 +33,30 @@ def boot_django():
             'django.contrib.staticfiles',
             'django.contrib.sites',
             'django_extensions',
+            # Rendering dependencies for the Recent Alerts page. These are lightweight,
+            # self-contained apps (no app-registry cascade), so the view tests can render
+            # the page's own template without installing the full TOM stack. tom_common
+            # itself is only imported (htmx_table), never an installed app — the page's
+            # base.html is satisfied by the stub in tests/templates/tom_common/base.html.
+            'crispy_forms',
+            'crispy_bootstrap4',
+            'django_filters',
+            'django_tables2',
+            'django_htmx',
             APP_NAME,  # defined above
         ),
+        # crispy_forms needs a template pack to render {% crispy filter.form %};
+        # bootstrap4 matches the TOM's CRISPY_TEMPLATE_PACK.
+        CRISPY_TEMPLATE_PACK='bootstrap4',
+        # Mount only the alertstreams URLs (under the 'alertstreams' namespace) so
+        # reverse('alertstreams:recent-alerts') and {% url 'alertstreams:topic-choices' %}
+        # resolve in view tests. See tests/urls.py.
+        ROOT_URLCONF='tom_alertstreams.tests.urls',
         EXTRA_FIELDS={},
+        # tom_alertstreams opt-in: the AppConfig's include_url_paths() and nav_items()
+        # only register the Recent Alerts URL/navbar when this is True, so the tests
+        # that exercise those integration points need it set in the test settings.
+        SHOW_RECENT_ALERTS=True,
         TIME_ZONE='UTC',
         USE_TZ=True,
         MIDDLEWARE=[
@@ -46,11 +67,18 @@ def boot_django():
             'django.contrib.auth.middleware.AuthenticationMiddleware',
             'django.contrib.messages.middleware.MessageMiddleware',
             'django.middleware.clickjacking.XFrameOptionsMiddleware',
+            # Sets request.htmx, which HTMXTableViewMixin inspects on the view.
+            'django_htmx.middleware.HtmxMiddleware',
         ],
         TEMPLATES=[
             {
                 'BACKEND': 'django.template.backends.django.DjangoTemplates',
-                'DIRS': [os.path.join(BASE_DIR, 'templates')],
+                # The second DIR holds the stub tom_common/base.html so the Recent
+                # Alerts page can render without tom_common in INSTALLED_APPS.
+                'DIRS': [
+                    os.path.join(BASE_DIR, 'templates'),
+                    os.path.join(os.path.dirname(__file__), 'templates'),
+                ],
                 'APP_DIRS': True,
                 'OPTIONS': {
                     'context_processors': [

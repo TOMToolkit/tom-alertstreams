@@ -8,6 +8,8 @@ from django.test import TestCase, tag, override_settings
 from django.urls import reverse
 from pydantic import ValidationError
 
+import warnings
+
 from tom_alertstreams.alertstreams.alertstream import NormalizedAlert
 from tom_alertstreams.alertstreams.alertstream import save_alert_to_database
 from tom_alertstreams.models import Alert
@@ -48,7 +50,7 @@ class FIFOQueueMixinTest(TestCase):
         return Alert.objects.create(
             stream_name=stream_name,
             topic='test.topic',
-            timestamp=datetime(2024, 1, day, tzinfo=timezone.utc),
+            observation_time=datetime(2024, 1, day, tzinfo=timezone.utc),
             alert_id=alert_id,
             raw_payload={},
         )
@@ -92,14 +94,14 @@ class NormalizedAlertTest(TestCase):
     def test_required_fields_raise_validation_error_when_missing(self) -> None:
         """NormalizedAlert raises ValidationError when required fields are absent."""
         with self.assertRaises(ValidationError):
-            NormalizedAlert(stream_name='test')  # missing alert_id and timestamp
+            NormalizedAlert(stream_name='test')  # missing required alert_id
 
     def test_optional_fields_default_to_none(self) -> None:
         """All optional NormalizedAlert fields default correctly when not supplied."""
         alert = NormalizedAlert(
             stream_name='test',
             alert_id='001',
-            timestamp=datetime.now(timezone.utc),
+            observation_time=datetime.now(timezone.utc),
         )
         self.assertIsNone(alert.ra)
         self.assertIsNone(alert.dec)
@@ -113,7 +115,7 @@ class NormalizedAlertTest(TestCase):
         alert = NormalizedAlert(
             stream_name='test',
             alert_id='abc-123',
-            timestamp=datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+            observation_time=datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
             topic='test.topic',
             object_id='ZTF24aaaaaaaa',
             ra=180.5,
@@ -215,15 +217,12 @@ class AntaresNormalizeAlertTest(TestCase):
         self.assertEqual(result.object_id, 'ANT2026bare')
         self.assertEqual(result.alert_id, 'ANT2026bare')
 
-    def test_missing_timestamp_defaults_to_now(self) -> None:
-        """Missing newest_alert_observation_time defaults to current UTC time."""
+    def test_missing_observation_time_is_none(self) -> None:
+        """A locus with no newest_alert_observation_time yields observation_time None."""
         locus = self._make_mock_locus(properties={})
         result = self.stream.normalize_alert(locus)
 
-        self.assertIsNotNone(result.timestamp)
-        # Should be within the last few seconds
-        delta = (datetime.now(timezone.utc) - result.timestamp).total_seconds()
-        self.assertLess(abs(delta), 5)
+        self.assertIsNone(result.observation_time)
 
 
 class SaveAlertToDatabaseTest(TestCase):
@@ -237,7 +236,7 @@ class SaveAlertToDatabaseTest(TestCase):
             return NormalizedAlert(
                 stream_name=stream_name,
                 alert_id=alert_id,
-                timestamp=datetime.now(timezone.utc),
+                observation_time=datetime.now(timezone.utc),
                 topic=topic,
                 raw_payload={},
             )
@@ -302,3 +301,759 @@ class AppConfigIntegrationTest(TestCase):
         self.assertEqual(len(items), 1)
         self.assertIn('partial', items[0])
         self.assertIn('navbar_link', items[0]['partial'])
+
+
+class FinkNormalizeAlertZtfTest(TestCase):
+    """Tests for FinkAlertStream.normalize_alert() with ZTF alert data."""
+
+    def setUp(self) -> None:
+        """Create a FinkAlertStream instance configured for ZTF."""
+        from tom_alertstreams.alertstreams.fink import FinkAlertStream
+
+        self.stream = FinkAlertStream(
+            FINK_USERNAME='test-user',
+            FINK_GROUP_ID='test-group',
+            FINK_SERVER='kafka-ztf.fink-broker.org:24499',
+            FINK_SURVEY='ztf',
+            TOPIC_HANDLERS={'test_topic': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database'},
+        )
+
+    def test_ztf_alert_extracts_candidate_fields(self) -> None:
+        """ZTF alert: object_id, magnitude, ra, dec extracted from candidate dict."""
+        alert = {
+            'objectId': 'ZTF24aatest',
+            'candid': 3346128430915015003,
+            'candidate': {
+                'jd': 2460400.5,
+                'ra': 180.5,
+                'dec': -30.2,
+                'magpsf': 18.7,
+                'fid': 1,
+            },
+        }
+        result = self.stream.normalize_alert(alert, topic='fink_sn_candidates_ztf')
+
+        self.assertEqual(result.object_id, 'ZTF24aatest')
+        self.assertEqual(result.alert_id, '3346128430915015003')
+        self.assertEqual(result.magnitude, 18.7)
+        self.assertEqual(result.ra, 180.5)
+        self.assertEqual(result.dec, -30.2)
+        self.assertIsNone(result.flux)
+        self.assertEqual(result.stream_name, 'fink')
+        self.assertEqual(result.topic, 'fink_sn_candidates_ztf')
+        self.assertEqual(result.raw_payload, alert)
+
+    def test_cutout_stamps_stripped_from_raw_payload(self) -> None:
+        """Cutout stamp data (binary FITS) is excluded from raw_payload."""
+        alert = {
+            'objectId': 'ZTF24aatest',
+            'candid': 12345,
+            'candidate': {'jd': 2460400.5, 'ra': 0, 'dec': 0, 'magpsf': 18.0},
+            'cutoutScience': {'fileName': 'sci.fits.gz', 'stampData': b'\x1f\x8b'},
+            'cutoutTemplate': {'fileName': 'ref.fits.gz', 'stampData': b'\x1f\x8b'},
+            'cutoutDifference': {'fileName': 'diff.fits.gz', 'stampData': b'\x1f\x8b'},
+        }
+        result = self.stream.normalize_alert(alert)
+
+        self.assertNotIn('cutoutScience', result.raw_payload)
+        self.assertNotIn('cutoutTemplate', result.raw_payload)
+        self.assertNotIn('cutoutDifference', result.raw_payload)
+        self.assertIn('objectId', result.raw_payload)
+        self.assertIn('candidate', result.raw_payload)
+
+    def test_ztf_alert_timestamp_from_jd(self) -> None:
+        """ZTF alert: timestamp is converted from JD to UTC datetime."""
+        alert = {
+            'objectId': 'ZTF24aatest',
+            'candid': 12345,
+            'candidate': {'jd': 2460400.5, 'ra': 0, 'dec': 0, 'magpsf': 18.0},
+        }
+        result = self.stream.normalize_alert(alert)
+
+        # JD 2460400.5 = 2024-03-31 00:00:00 UTC
+        self.assertEqual(result.observation_time.year, 2024)
+        self.assertEqual(result.observation_time.month, 3)
+        self.assertEqual(result.observation_time.day, 31)
+
+    def test_ztf_missing_candidate_defaults_gracefully(self) -> None:
+        """ZTF alert: missing candidate dict doesn't crash."""
+        alert = {'objectId': 'ZTF24aatest', 'candid': 99999}
+        result = self.stream.normalize_alert(alert)
+
+        self.assertEqual(result.object_id, 'ZTF24aatest')
+        self.assertIsNone(result.ra)
+        self.assertIsNone(result.dec)
+        self.assertIsNone(result.magnitude)
+        # Missing JD -> no observation time
+        self.assertIsNone(result.observation_time)
+
+
+class FinkNormalizeAlertLsstTest(TestCase):
+    """Tests for FinkAlertStream.normalize_alert() with LSST alert data."""
+
+    def setUp(self) -> None:
+        """Create a FinkAlertStream instance configured for LSST."""
+        from tom_alertstreams.alertstreams.fink import FinkAlertStream
+
+        self.stream = FinkAlertStream(
+            FINK_USERNAME='test-user',
+            FINK_GROUP_ID='test-group',
+            FINK_SERVER='kafka-lsst.fink-broker.org:24499',
+            FINK_SURVEY='lsst',
+            TOPIC_HANDLERS={'test_topic': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database'},
+        )
+
+    def test_lsst_alert_extracts_dia_source_fields(self) -> None:
+        """LSST alert: flux, ra, dec extracted from diaSource dict."""
+        alert = {
+            'diaSource': {
+                'diaSourceId': 9876543210,
+                'midpointMjdTai': 60400.5,
+                'ra': 150.3,
+                'dec': -20.1,
+                'psFlux': 1234.56,
+                'psFluxErr': 12.3,
+            },
+            'diaObject': {
+                'diaObjectId': 170028527925067818,
+            },
+        }
+        result = self.stream.normalize_alert(alert, topic='fink_sn_candidates_lsst')
+
+        self.assertEqual(result.object_id, '170028527925067818')
+        self.assertEqual(result.alert_id, '9876543210')
+        self.assertEqual(result.flux, 1234.56)
+        self.assertIsNone(result.magnitude)
+        self.assertEqual(result.ra, 150.3)
+        self.assertEqual(result.dec, -20.1)
+        self.assertEqual(result.stream_name, 'fink')
+        self.assertEqual(result.topic, 'fink_sn_candidates_lsst')
+        self.assertEqual(result.raw_payload, alert)
+
+    def test_lsst_alert_timestamp_from_mjd_tai(self) -> None:
+        """LSST alert: timestamp is converted from MJD TAI to UTC datetime."""
+        alert = {
+            'diaSource': {'diaSourceId': 1, 'midpointMjdTai': 60400.5},
+            'diaObject': {'diaObjectId': 12345},
+        }
+        result = self.stream.normalize_alert(alert)
+
+        # MJD 60400.5 → 2024-03-27 12:00:00 UTC (approx — TAI offset ~37s is small)
+        self.assertEqual(result.observation_time.year, 2024)
+        self.assertIsNotNone(result.observation_time)
+
+    def test_lsst_sso_alert_uses_designation(self) -> None:
+        """LSST SSO alert: falls back to mpc_orbits.designation for object_id."""
+        alert = {
+            'diaSource': {'diaSourceId': 5555, 'midpointMjdTai': 60400.5, 'ra': 0, 'dec': 0},
+            'diaObject': None,
+            'mpc_orbits': {'designation': '2024 AB1'},
+        }
+        result = self.stream.normalize_alert(alert)
+
+        self.assertEqual(result.object_id, '2024 AB1')
+
+    def test_lsst_missing_dia_source_defaults_gracefully(self) -> None:
+        """LSST alert: missing diaSource dict doesn't crash."""
+        alert = {'diaObject': {'diaObjectId': 12345}}
+        result = self.stream.normalize_alert(alert)
+
+        self.assertIsNone(result.ra)
+        self.assertIsNone(result.dec)
+        self.assertIsNone(result.flux)
+        self.assertIsNone(result.observation_time)  # no diaSource -> no observation time
+
+
+class FinkConfigValidationTest(TestCase):
+    """Tests for FinkConfig cross-field validation."""
+
+    def test_matching_server_and_survey_no_warning(self) -> None:
+        """No warning when FINK_SERVER contains the survey name."""
+        from tom_alertstreams.alertstreams.fink import FinkConfig
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            FinkConfig(
+                FINK_USERNAME='test',
+                FINK_GROUP_ID='test-group',
+                FINK_SERVER='kafka-ztf.fink-broker.org:24499',
+                FINK_SURVEY='ztf',
+                TOPIC_HANDLERS={'t': 'handler.path'},
+            )
+        self.assertEqual(len(caught), 0)
+
+    def test_mismatched_server_and_survey_warns(self) -> None:
+        """Warning when FINK_SERVER doesn't contain the survey name."""
+        from tom_alertstreams.alertstreams.fink import FinkConfig
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            FinkConfig(
+                FINK_USERNAME='test',
+                FINK_GROUP_ID='test-group',
+                FINK_SERVER='kafka-ztf.fink-broker.org:24499',
+                FINK_SURVEY='lsst',
+                TOPIC_HANDLERS={'t': 'handler.path'},
+            )
+        self.assertEqual(len(caught), 1)
+        self.assertIn('does not contain survey name', str(caught[0].message))
+
+    def test_topics_matching_survey_pass(self) -> None:
+        """No error when every topic's suffix matches FINK_SURVEY."""
+        from tom_alertstreams.alertstreams.fink import FinkConfig
+
+        # ZTF survey paired with a '_ztf' topic
+        FinkConfig(
+            FINK_USERNAME='test',
+            FINK_GROUP_ID='test-group',
+            FINK_SERVER='kafka-ztf.fink-broker.org:24499',
+            FINK_SURVEY='ztf',
+            TOPIC_HANDLERS={'fink_sn_candidates_ztf': 'handler.path'},
+        )
+        # LSST survey paired with a '_lsst' topic
+        FinkConfig(
+            FINK_USERNAME='test',
+            FINK_GROUP_ID='test-group',
+            FINK_SERVER='kafka-lsst.fink-broker.org:24499',
+            FINK_SURVEY='lsst',
+            TOPIC_HANDLERS={'fink_sn_candidates_lsst': 'handler.path'},
+        )
+
+    def test_opposite_survey_topic_raises(self) -> None:
+        """A topic tagged for the opposite survey raises ValidationError.
+
+        This is the silent-data-loss bug the hardened validator guards against:
+        FINK_SURVEY='lsst' with a '_ztf' topic would route ZTF alerts to the LSST
+        normalize branch and drop them all. Now it fails at config-load time.
+        """
+        from tom_alertstreams.alertstreams.fink import FinkConfig
+
+        with self.assertRaises(ValidationError) as ctx:
+            FinkConfig(
+                FINK_USERNAME='test',
+                FINK_GROUP_ID='test-group',
+                FINK_SERVER='kafka-lsst.fink-broker.org:24499',
+                FINK_SURVEY='lsst',
+                TOPIC_HANDLERS={'fink_sn_candidates_ztf': 'handler.path'},
+            )
+        self.assertIn('fink_sn_candidates_ztf', str(ctx.exception))
+
+
+class FinkPresenterTest(TestCase):
+    """Tests for the survey-aware FinkPresenter URL construction."""
+
+    def setUp(self) -> None:
+        from tom_alertstreams.tables import FinkPresenter
+        self.presenter = FinkPresenter()
+
+    def _alert(self, object_id: str | None, topic: str) -> Alert:
+        """Build an unsaved Alert with just the fields the presenter reads."""
+        return Alert(stream_name='fink', object_id=object_id, topic=topic)
+
+    def test_ztf_topic_links_to_ztf_portal(self) -> None:
+        """A '_ztf' topic routes to the ZTF Fink portal by object_id."""
+        url = self.presenter.object_url(self._alert('ZTF21abcdxyz', 'fink_sn_candidates_ztf'))
+        self.assertEqual(url, 'https://ztf.fink-portal.org/ZTF21abcdxyz')
+
+    def test_lsst_topic_links_to_lsst_portal(self) -> None:
+        """A '_lsst' topic routes to the LSST Fink portal by object_id."""
+        url = self.presenter.object_url(self._alert('170028527925067818', 'fink_sn_candidates_lsst'))
+        self.assertEqual(url, 'https://lsst.fink-portal.org/170028527925067818')
+
+    def test_unrecognized_topic_suffix_returns_none(self) -> None:
+        """A topic with no survey suffix yields no link."""
+        url = self.presenter.object_url(self._alert('ZTF21abcdxyz', 'fink.test'))
+        self.assertIsNone(url)
+
+    def test_missing_object_id_returns_none(self) -> None:
+        """No object_id means no object page to link to."""
+        url = self.presenter.object_url(self._alert(None, 'fink_sn_candidates_ztf'))
+        self.assertIsNone(url)
+
+
+# ---------------------------------------------------------------------------
+# GCN normalize_alert tests
+# ---------------------------------------------------------------------------
+
+class GCNNormalizeAlertTest(TestCase):
+    """Tests for GCNKafkaAlertStream.normalize_alert()."""
+
+    def setUp(self) -> None:
+        from tom_alertstreams.alertstreams.gcn import GCNKafkaAlertStream
+
+        self.stream = GCNKafkaAlertStream(
+            GCN_KAFKA_CLIENT_ID='test-id',
+            GCN_KAFKA_CLIENT_SECRET='test-secret',
+            TOPIC_HANDLERS={'gcn.circulars': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database'},
+        )
+
+    def _message(self, payload: dict, key: bytes | None = None, topic: str = 'gcn.circulars') -> MagicMock:
+        """Build a mock confluent_kafka Message exposing value()/key()/topic()."""
+        import json
+        msg = MagicMock()
+        msg.value.return_value = json.dumps(payload).encode('utf-8')
+        msg.key.return_value = key
+        msg.topic.return_value = topic
+        return msg
+
+    def test_circular_uses_circular_id_and_created_on(self) -> None:
+        """gcn.circulars: alert_id from circularId, published_time from createdOn; no observation."""
+        msg = self._message({
+            'circularId': 44876,
+            'createdOn': 1780944383971,
+            'subject': 'GRB 260607A: AT2026ong is a type-Ia SN',
+        })
+        result = self.stream.normalize_alert(msg, topic='gcn.circulars')
+
+        self.assertEqual(result.alert_id, '44876')           # not the Kafka-key hash fallback
+        self.assertIsNone(result.observation_time)           # a circular is not an observation
+        self.assertEqual(result.published_time.year, 2026)   # createdOn 1780944383971 ms -> 2026
+        self.assertEqual(result.stream_name, 'gcn')
+        self.assertEqual(result.topic, 'gcn.circulars')
+
+    def test_non_circular_falls_back_to_message_key(self) -> None:
+        """Without circularId, alert_id comes from the Kafka message key."""
+        msg = self._message({'foo': 'bar'}, key=b'some-key', topic='gcn.classic.text.LVC_INITIAL')
+        result = self.stream.normalize_alert(msg, topic='gcn.classic.text.LVC_INITIAL')
+
+        self.assertEqual(result.alert_id, 'some-key')
+
+    def test_heartbeat_falls_back_to_alert_datetime(self) -> None:
+        """A gcn.heartbeat (only $schema + alert_datetime, no key) uses alert_datetime as id."""
+        msg = self._message(
+            {'$schema': 'https://gcn.nasa.gov/docs/schema/v4.1.0/.../Alert.schema.json',
+             'alert_datetime': '2026-06-08T21:00:00.557693Z'},
+            key=None, topic='gcn.heartbeat',
+        )
+        result = self.stream.normalize_alert(msg, topic='gcn.heartbeat')
+
+        self.assertEqual(result.alert_id, '2026-06-08T21:00:00.557693Z')  # not a hash
+        self.assertIsNone(result.observation_time)
+        self.assertEqual(result.published_time.year, 2026)
+
+
+# ---------------------------------------------------------------------------
+# ALeRCE tests
+# ---------------------------------------------------------------------------
+
+class AlerceConfigValidationTest(TestCase):
+    """Tests for AlerceConfig defaults and required fields."""
+
+    def test_defaults_applied(self) -> None:
+        """ALERCE_KAFKA_SERVER and TOPIC_PREFIX have sensible defaults."""
+        from tom_alertstreams.alertstreams.alerce import AlerceConfig
+
+        config = AlerceConfig(
+            ALERCE_GROUP_ID='g', ALERCE_USERNAME='u', ALERCE_PASSWORD='p',
+            TOPIC_HANDLERS={'lc_classifier': 'handler.path'},
+        )
+        self.assertEqual(config.ALERCE_KAFKA_SERVER, 'kafka.alerce.science:9093')
+        self.assertEqual(config.TOPIC_PREFIX, 'lc_classifier')
+
+    def test_missing_credentials_raise(self) -> None:
+        """Missing ALERCE_USERNAME/PASSWORD/GROUP_ID raises ValidationError."""
+        from tom_alertstreams.alertstreams.alerce import AlerceConfig
+
+        with self.assertRaises(ValidationError):
+            AlerceConfig(TOPIC_HANDLERS={'lc_classifier': 'handler.path'})
+
+
+class AlerceNormalizeAlertTest(TestCase):
+    """Tests for AlerceAlertStream.normalize_alert()."""
+
+    def setUp(self) -> None:
+        from tom_alertstreams.alertstreams.alerce import AlerceAlertStream
+
+        self.stream = AlerceAlertStream(
+            ALERCE_GROUP_ID='test-group',
+            ALERCE_USERNAME='test-user',
+            ALERCE_PASSWORD='test-pass',
+            TOPIC_HANDLERS={'lc_classifier': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database'},
+        )
+
+    def test_extracts_object_and_candidate_fields(self) -> None:
+        """object_id/alert_id/ra/dec/magnitude are extracted from an ALeRCE record."""
+        record = {
+            'oid': 'ZTF26aaxipwr',
+            'candid': 3438360811115015009,
+            'lastmjd': 60400.5,
+            'meanra': 150.3,
+            'meandec': -20.1,
+            'magpsf': 18.5,
+        }
+        result = self.stream.normalize_alert(record, topic='lc_classifier_20260605')
+
+        self.assertEqual(result.object_id, 'ZTF26aaxipwr')
+        self.assertEqual(result.alert_id, '3438360811115015009')
+        self.assertEqual(result.ra, 150.3)
+        self.assertEqual(result.dec, -20.1)
+        self.assertEqual(result.magnitude, 18.5)
+        self.assertEqual(result.stream_name, 'alerce')
+        self.assertEqual(result.topic, 'lc_classifier_20260605')
+
+    def test_timestamp_from_lastmjd(self) -> None:
+        """timestamp is converted from the record's lastmjd."""
+        record = {'oid': 'ZTF1', 'candid': 1, 'lastmjd': 60400.5}
+        result = self.stream.normalize_alert(record)
+
+        self.assertEqual(result.observation_time.year, 2024)
+        self.assertIsNotNone(result.observation_time)
+
+    def test_aid_fallback_for_object_id(self) -> None:
+        """object_id falls back to 'aid' when 'oid' is absent."""
+        record = {'aid': 'AL26abc', 'candid': 5}
+        result = self.stream.normalize_alert(record)
+
+        self.assertEqual(result.object_id, 'AL26abc')
+
+    def test_missing_fields_default_gracefully(self) -> None:
+        """Missing coordinates/magnitude/mjd don't crash; timestamp falls back to now."""
+        record = {'oid': 'ZTF1', 'candid': 1}
+        result = self.stream.normalize_alert(record)
+
+        self.assertIsNone(result.ra)
+        self.assertIsNone(result.dec)
+        self.assertIsNone(result.magnitude)
+        self.assertIsNone(result.observation_time)  # no lastmjd/firstmjd -> no observation time
+
+
+# ---------------------------------------------------------------------------
+# Lasair normalize_alert tests
+# ---------------------------------------------------------------------------
+
+class LasairNormalizeAlertStandardTest(TestCase):
+    """Tests for LasairAlertStream.normalize_alert() with standard-tier alerts.
+
+    Standard tier: top-level diaObjectId, ra, decl, UTC — no nested alert dict.
+    """
+
+    def setUp(self) -> None:
+        from tom_alertstreams.alertstreams.lasair import LasairAlertStream
+        # Build a minimal LasairAlertStream with a mock config
+        self.stream = LasairAlertStream(
+            LASAIR_KAFKA_SERVER='kafka.test:9092',
+            LASAIR_GROUP_ID='test-group',
+            TOPIC_HANDLERS={'test.topic': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database'},
+        )
+
+    def test_standard_tier_extracts_top_level_fields(self) -> None:
+        """Standard tier alert populates diaObjectId, ra, decl, UTC correctly."""
+        raw_alert = {
+            'diaObjectId': 169760235333878021,
+            'ra': 221.87087,
+            'decl': -38.16173,
+            'UTC': '2026-01-29 11:40:14',
+        }
+        result = self.stream.normalize_alert(raw_alert, topic='test.topic')
+        self.assertEqual(result.stream_name, 'lasair')
+        self.assertEqual(result.object_id, '169760235333878021')
+        self.assertEqual(result.alert_id, '169760235333878021')
+        self.assertAlmostEqual(result.ra, 221.87087)
+        self.assertAlmostEqual(result.dec, -38.16173)  # 'decl' mapped to 'dec'
+        self.assertIsNone(result.magnitude)
+        self.assertIsNone(result.flux)
+
+    def test_standard_tier_timestamp_from_utc_string(self) -> None:
+        """Standard tier parses the UTC string into a timezone-aware datetime."""
+        raw_alert = {
+            'diaObjectId': 12345,
+            'ra': 0.0,
+            'decl': 0.0,
+            'UTC': '2026-01-29 11:40:14',
+        }
+        result = self.stream.normalize_alert(raw_alert)
+        self.assertEqual(result.observation_time.year, 2026)
+        self.assertEqual(result.observation_time.month, 1)
+        self.assertEqual(result.observation_time.day, 29)
+        self.assertIsNotNone(result.observation_time.tzinfo)
+
+    def test_standard_tier_missing_fields_defaults_gracefully(self) -> None:
+        """Standard tier with missing optional fields doesn't crash."""
+        raw_alert = {}
+        result = self.stream.normalize_alert(raw_alert, topic='test.topic')
+        self.assertEqual(result.alert_id, '')
+        self.assertIsNone(result.object_id)
+        self.assertIsNone(result.ra)
+        self.assertIsNone(result.dec)
+        self.assertIsNone(result.observation_time)  # no UTC/MJD -> no observation time
+
+
+class LasairNormalizeAlertLiteTest(TestCase):
+    """Tests for LasairAlertStream.normalize_alert() with lite-tier alerts.
+
+    Lite tier: standard fields plus alert.diaSourcesList with lightcurve data.
+    """
+
+    def setUp(self) -> None:
+        from tom_alertstreams.alertstreams.lasair import LasairAlertStream
+        self.stream = LasairAlertStream(
+            LASAIR_KAFKA_SERVER='kafka.test:9092',
+            LASAIR_GROUP_ID='test-group',
+            TOPIC_HANDLERS={'test.topic': 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database'},
+        )
+
+    def test_lite_tier_extracts_flux_from_dia_sources(self) -> None:
+        """Lite tier extracts psfFlux from the first diaSource entry."""
+        raw_alert = {
+            'diaObjectId': 169760235333878021,
+            'ra': 221.87087,
+            'decl': -38.16173,
+            'UTC': '2026-01-29 11:40:14',
+            'alert': {
+                'diaSourcesList': [
+                    {
+                        'midpointMjdTai': 60736.5,
+                        'psfFlux': 1234.567,
+                        'psfFluxErr': 12.3,
+                        'band': 'r',
+                        'reliability': 0.95,
+                    },
+                ],
+            },
+        }
+        result = self.stream.normalize_alert(raw_alert, topic='test.topic')
+        self.assertAlmostEqual(result.flux, 1234.567)
+        self.assertIsNone(result.magnitude)
+
+    def test_lite_tier_timestamp_from_mjd(self) -> None:
+        """Lite tier uses midpointMjdTai from diaSourcesList for timestamp."""
+        raw_alert = {
+            'diaObjectId': 12345,
+            'ra': 0.0,
+            'decl': 0.0,
+            'UTC': '2026-01-29 11:40:14',
+            'alert': {
+                'diaSourcesList': [
+                    {'midpointMjdTai': 60736.5, 'psfFlux': 100.0},
+                ],
+            },
+        }
+        result = self.stream.normalize_alert(raw_alert)
+        # MJD 60736.5 should give a timestamp in 2025
+        self.assertEqual(result.observation_time.year, 2025)
+
+    def test_raw_payload_preserved(self) -> None:
+        """The full raw alert dict is stored in raw_payload."""
+        raw_alert = {
+            'diaObjectId': 12345,
+            'ra': 10.0,
+            'decl': 20.0,
+            'UTC': '2026-01-01 00:00:00',
+            'extra_field': 'should be preserved',
+        }
+        result = self.stream.normalize_alert(raw_alert)
+        self.assertEqual(result.raw_payload['extra_field'], 'should be preserved')
+        self.assertEqual(result.raw_payload['diaObjectId'], 12345)
+
+
+class LasairConfigTest(TestCase):
+    """Tests for LasairConfig Pydantic model validation."""
+
+    def test_valid_config(self) -> None:
+        """Valid config with all required fields doesn't raise."""
+        from tom_alertstreams.alertstreams.lasair import LasairConfig
+        config = LasairConfig(
+            LASAIR_KAFKA_SERVER='kafka.test:9092',
+            LASAIR_GROUP_ID='test-group',
+            TOPIC_HANDLERS={'topic': 'handler.path'},
+        )
+        self.assertEqual(config.LASAIR_KAFKA_SERVER, 'kafka.test:9092')
+        self.assertEqual(config.LASAIR_GROUP_ID, 'test-group')
+        self.assertIsNone(config.LASAIR_TOKEN)
+
+    def test_missing_required_field_raises(self) -> None:
+        """Missing LASAIR_KAFKA_SERVER raises ValidationError."""
+        from tom_alertstreams.alertstreams.lasair import LasairConfig
+        with self.assertRaises(ValidationError):
+            LasairConfig(
+                LASAIR_GROUP_ID='test-group',
+                TOPIC_HANDLERS={'topic': 'handler.path'},
+            )
+
+
+# ---------------------------------------------------------------------------
+# Pitt-Google (Google Cloud Pub/Sub) tests
+# ---------------------------------------------------------------------------
+
+# Real, importable dotted-paths so PittGoogleAlertStream instantiation (which imports its
+# TOPIC_HANDLERS values) succeeds. pittgoogle imports stay lazy (inside methods) so test
+# collection doesn't hard-require pittgoogle-client, matching the Fink/Lasair pattern.
+_SAVE_HANDLER = 'tom_alertstreams.alertstreams.alertstream.save_alert_to_database'
+_PITTGOOGLE_THROTTLE_HANDLER = 'tom_alertstreams.alertstreams.pittgoogle.save_pittgoogle_throttled'
+_PITTGOOGLE_STREAM = 'tom_alertstreams.alertstreams.pittgoogle.PittGoogleAlertStream'
+
+
+class PittGoogleConfigValidationTest(TestCase):
+    """Tests for PittGoogleConfig's one-topic-per-entry rule."""
+
+    def test_single_topic_ok(self) -> None:
+        """Exactly one topic validates; PITTGOOGLE_PROJECT defaults to Pitt-Google's project."""
+        from tom_alertstreams.alertstreams.pittgoogle import PittGoogleConfig
+
+        config = PittGoogleConfig(TOPIC_HANDLERS={'ztf-loop': _SAVE_HANDLER})
+        self.assertEqual(list(config.TOPIC_HANDLERS), ['ztf-loop'])
+        self.assertTrue(config.PITTGOOGLE_PROJECT)  # non-empty default
+        self.assertIsNone(config.PITTGOOGLE_SUBSCRIPTION)
+
+    def test_multiple_topics_raise(self) -> None:
+        """More than one topic per entry raises (one Pub/Sub subscription binds to one topic)."""
+        from tom_alertstreams.alertstreams.pittgoogle import PittGoogleConfig
+
+        with self.assertRaises(ValidationError) as ctx:
+            PittGoogleConfig(TOPIC_HANDLERS={'ztf-loop': _SAVE_HANDLER, 'ztf-alerts': _SAVE_HANDLER})
+        self.assertIn('one topic per entry', str(ctx.exception))
+
+
+class PittGoogleNormalizeAlertTest(TestCase):
+    """Tests for PittGoogleAlertStream.normalize_alert() with ZTF alert data."""
+
+    def setUp(self) -> None:
+        from tom_alertstreams.alertstreams.pittgoogle import PittGoogleAlertStream
+
+        self.stream = PittGoogleAlertStream(TOPIC_HANDLERS={'ztf-loop': _PITTGOOGLE_THROTTLE_HANDLER})
+
+    def _make_alert(self, payload: dict, sourceid: object, objectid: object,
+                    attributes: dict) -> MagicMock:
+        """Minimal stand-in for a pittgoogle.Alert — only the attrs normalize_alert reads."""
+        alert = MagicMock()
+        alert.dict = payload
+        alert.sourceid = sourceid
+        alert.objectid = objectid
+        alert.attributes = attributes
+        return alert
+
+    def test_ids_from_sourceid_and_objectid(self) -> None:
+        """alert_id comes from sourceid (candid, the detection); object_id from objectid (objectId)."""
+        alert = self._make_alert(
+            payload={
+                'objectId': 'ZTF18admgfuc',
+                'candid': 3438360335315010000,
+                'candidate': {'jd': 2460400.5, 'ra': 12.3, 'dec': -4.5, 'magpsf': 18.2},
+            },
+            sourceid=3438360335315010000,
+            objectid='ZTF18admgfuc',
+            attributes={'kafka.timestamp': '1780304740275'},
+        )
+        result = self.stream.normalize_alert(alert, topic='ztf-loop')
+
+        self.assertEqual(result.alert_id, '3438360335315010000')  # candid (the detection)
+        self.assertEqual(result.object_id, 'ZTF18admgfuc')         # objectId (the persistent object)
+        self.assertEqual(result.ra, 12.3)
+        self.assertEqual(result.dec, -4.5)
+        self.assertEqual(result.magnitude, 18.2)
+        self.assertIsNone(result.flux)
+        self.assertEqual(result.stream_name, 'pittgoogle')
+        self.assertEqual(result.topic, 'ztf-loop')
+
+    def test_observation_time_from_jd(self) -> None:
+        """observation_time is converted from the candidate's JD."""
+        alert = self._make_alert(
+            payload={'candidate': {'jd': 2460400.5}}, sourceid=1, objectid='X', attributes={})
+        result = self.stream.normalize_alert(alert)
+        # JD 2460400.5 = 2024-03-31 00:00:00 UTC
+        self.assertEqual(result.observation_time.year, 2024)
+        self.assertEqual(result.observation_time.month, 3)
+        self.assertEqual(result.observation_time.day, 31)
+
+    def test_published_time_from_kafka_timestamp(self) -> None:
+        """published_time comes from the survey's upstream kafka.timestamp (ms epoch)."""
+        alert = self._make_alert(
+            payload={'candidate': {}}, sourceid=1, objectid='X',
+            attributes={'kafka.timestamp': '1780304740275'})
+        result = self.stream.normalize_alert(alert)
+
+        self.assertIsNotNone(result.published_time)
+        self.assertEqual(result.published_time.tzinfo, timezone.utc)
+        self.assertAlmostEqual(result.published_time.timestamp(), 1780304740.275, places=3)
+
+    def test_cutouts_stripped_from_raw_payload(self) -> None:
+        """Cutout stamp data (binary FITS) is excluded from raw_payload; the rest is kept."""
+        alert = self._make_alert(
+            payload={
+                'objectId': 'ZTF1', 'candid': 1, 'candidate': {'jd': 2460400.5},
+                'cutoutScience': {'stampData': b'\x1f\x8b'},
+                'cutoutTemplate': {'stampData': b'\x1f\x8b'},
+                'cutoutDifference': {'stampData': b'\x1f\x8b'},
+            },
+            sourceid=1, objectid='ZTF1', attributes={})
+        result = self.stream.normalize_alert(alert)
+
+        self.assertNotIn('cutoutScience', result.raw_payload)
+        self.assertNotIn('cutoutTemplate', result.raw_payload)
+        self.assertNotIn('cutoutDifference', result.raw_payload)
+        self.assertIn('candidate', result.raw_payload)
+
+    def test_missing_candidate_defaults_gracefully(self) -> None:
+        """A ZTF alert with no candidate dict doesn't crash; coords/times are None."""
+        alert = self._make_alert(
+            payload={'objectId': 'ZTF1', 'candid': 7}, sourceid=7, objectid='ZTF1', attributes={})
+        result = self.stream.normalize_alert(alert)
+
+        self.assertEqual(result.alert_id, '7')
+        self.assertEqual(result.object_id, 'ZTF1')
+        self.assertIsNone(result.ra)
+        self.assertIsNone(result.dec)
+        self.assertIsNone(result.magnitude)
+        self.assertIsNone(result.observation_time)
+        self.assertIsNone(result.published_time)
+
+
+class SavePittGoogleThrottledTest(TestCase):
+    """Tests for the save_pittgoogle_throttled throttle handler (mirrors GCN's heartbeat throttle)."""
+
+    def _make_mock_stream(self) -> MagicMock:
+        """Return a mock AlertStream whose normalize_alert produces a fixed NormalizedAlert."""
+        mock_stream = MagicMock()
+
+        def normalize(raw_alert: object, topic: str = '') -> NormalizedAlert:
+            return NormalizedAlert(
+                stream_name='pittgoogle', alert_id='candid-1', topic=topic, raw_payload={})
+
+        mock_stream.get_normalization_function.return_value = normalize
+        return mock_stream
+
+    def _alert_with_publish_time(self, publish_time: datetime) -> MagicMock:
+        """A pittgoogle.Alert stand-in carrying a Pub/Sub publishTime."""
+        alert = MagicMock()
+        alert.msg.publish_time = publish_time
+        return alert
+
+    def test_saves_alert_in_minute_first_second(self) -> None:
+        """A publishTime in the minute's first second is saved."""
+        from tom_alertstreams.alertstreams.pittgoogle import save_pittgoogle_throttled
+
+        in_window = datetime(2026, 6, 10, 5, 0, 0, tzinfo=timezone.utc)  # 0 s into the minute
+        result = save_pittgoogle_throttled(
+            self._alert_with_publish_time(in_window),
+            alert_stream=self._make_mock_stream(), topic='ztf-loop')
+        self.assertIsInstance(result, Alert)
+        self.assertEqual(Alert.objects.count(), 1)
+
+    def test_drops_alert_outside_first_second(self) -> None:
+        """A publishTime 30 seconds into the minute is dropped (not saved)."""
+        from tom_alertstreams.alertstreams.pittgoogle import save_pittgoogle_throttled
+
+        out_window = datetime(2026, 6, 10, 5, 0, 30, tzinfo=timezone.utc)
+        result = save_pittgoogle_throttled(
+            self._alert_with_publish_time(out_window),
+            alert_stream=self._make_mock_stream(), topic='ztf-loop')
+        self.assertIsNone(result)
+        self.assertEqual(Alert.objects.count(), 0)
+
+
+class StreamStatusDedupTest(TestCase):
+    """The dashboard shows one badge per STREAM_NAME even with several same-name entries."""
+
+    @override_settings(ALERT_STREAMS=[
+        {'ACTIVE': True, 'NAME': _PITTGOOGLE_STREAM,
+         'OPTIONS': {'TOPIC_HANDLERS': {'ztf-loop': _PITTGOOGLE_THROTTLE_HANDLER}}},
+        {'ACTIVE': True, 'NAME': _PITTGOOGLE_STREAM,
+         'OPTIONS': {'TOPIC_HANDLERS': {'ztf-alerts': _SAVE_HANDLER}}},
+    ])
+    def test_duplicate_stream_name_yields_one_badge(self) -> None:
+        """Two 'pittgoogle' entries (one per topic) collapse to a single dashboard badge."""
+        from tom_alertstreams.views import _build_stream_status
+
+        status = _build_stream_status()
+        pittgoogle_badges = [s for s in status if s['stream_name'] == 'pittgoogle']
+        self.assertEqual(len(pittgoogle_badges), 1)

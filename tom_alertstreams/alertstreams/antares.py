@@ -8,7 +8,9 @@ from typing import Any, ClassVar
 
 from antares_client.stream import StreamingClient
 
-from tom_alertstreams.alertstreams.alertstream import AlertStream, AlertStreamConfig, NormalizedAlert
+from tom_alertstreams.alertstreams.alertstream import (
+    AlertStream, AlertStreamConfig, NormalizedAlert, _mjd_to_datetime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,21 +21,6 @@ _MOCK_DEC = 0.0
 _MOCK_MAGNITUDE = 99.0
 INTER_ALERT_SLEEP_MIN = 360  # six minutes
 INTER_ALERT_SLEEP_MAX = 420  # seven minutes
-
-
-# ---------------------------------------------------------------------------
-# MJD helper
-# ---------------------------------------------------------------------------
-
-def _mjd_to_datetime(mjd: float) -> datetime:
-    """Convert Modified Julian Date to a timezone-aware UTC datetime.
-
-    MJD = JD - 2400000.5. JD 2440587.5 = Unix epoch (1970-01-01 00:00:00 UTC).
-    So: unix_seconds = (MJD + 2400000.5 - 2440587.5) * 86400
-                     = (MJD - 40587.0) * 86400
-    """
-    unix_seconds = (mjd - 40587.0) * 86400.0
-    return datetime.fromtimestamp(unix_seconds, tz=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +82,7 @@ class AntaresMockAlertStream(AlertStream):
     """
     configuration_class = AntaresMockConfig  # type: ignore[assignment]
     STREAM_NAME: ClassVar[str] = 'antares'
+    IS_MOCK: ClassVar[bool] = True
 
     def normalize_alert(self, raw_alert: dict, topic: str = '') -> NormalizedAlert:
         """Map a mock ANTARES alert dict to a NormalizedAlert.
@@ -109,7 +97,8 @@ class AntaresMockAlertStream(AlertStream):
         return NormalizedAlert(
             stream_name=self.STREAM_NAME,
             topic=topic or raw_alert.get('topic', ''),
-            timestamp=datetime.fromisoformat(raw_alert['timestamp']),
+            observation_time=None,  # a mock alert has no real observation
+            published_time=datetime.fromisoformat(raw_alert['timestamp']),
             alert_id=raw_alert['alert_id'],
             object_id=raw_alert.get('object_id'),
             ra=raw_alert.get('ra'),
@@ -249,7 +238,7 @@ class AntaresAlertStream(AlertStream):
         # Timestamp from ANTARES-enriched locus property (MJD float).
         # This avoids lazy-loading locus.alerts, which triggers an HTTP API call.
         mjd = alert_properties.get('newest_alert_observation_time')
-        timestamp = _mjd_to_datetime(mjd) if mjd is not None else datetime.now(timezone.utc)
+        timestamp = _mjd_to_datetime(mjd) if mjd is not None else None
 
         # Magnitude — ANTARES-enriched, populated for ZTF loci.
         magnitude = alert_properties.get('newest_alert_magnitude')
@@ -281,7 +270,8 @@ class AntaresAlertStream(AlertStream):
         normalized_alert = NormalizedAlert(
             stream_name=self.STREAM_NAME,
             topic=topic,
-            timestamp=timestamp,
+            observation_time=timestamp,
+            published_time=None,  # ANTARES locus exposes no broker-publish time we extract
             alert_id=str(raw_alert.locus_id),
             object_id=str(object_id),
             ra=float(raw_alert.ra) if raw_alert.ra is not None else None,
