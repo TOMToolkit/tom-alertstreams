@@ -1,0 +1,3 @@
+<li class="nav-item {% if request.resolver_match.namespace == 'alertstreams' %}active{% endif %}">
+    <a class="nav-link" href="{% url 'alertstreams:recent-alerts' %}">Recent Alerts</a>
+</li>

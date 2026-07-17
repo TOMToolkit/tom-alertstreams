@@ -1,0 +1,55 @@
+{% extends 'tom_common/base.html' %}
+{% load crispy_forms_tags %}
+
+{% block title %}Recent Alerts{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-12">
+        <h2>Recent Alerts</h2>
+        <p class="text-muted">
+            The {{ record_count }} most recent alert{{ record_count|pluralize }} received from configured alert streams.
+            Alert IDs link to the stream's public archive where available.
+        </p>
+
+        {# Stream status dashboard -- auto-refreshes via OOB swap in the table partial #}
+        <div id="stream-dashboard">
+            {% include "tom_alertstreams/partials/stream_dashboard.html" %}
+        </div>
+        <hr>
+
+        {# Filter form -- id="filter-form" must match hx-include in AlertTable.Meta.attrs #}
+        <form id="filter-form" class="mb-3"
+              hx-get="{{ request.get_full_path }}"
+              hx-target="div.table-container"
+              hx-swap="innerHTML"
+              hx-indicator=".progress">
+            {% crispy filter.form %}
+        </form>
+
+        {# Cascading select: update topic choices when stream changes.             #}
+        {# Fires only on user interaction with stream_name, not on the 5-second    #}
+        {# auto-poll, so it won't close the dropdown if the user is mid-selection. #}
+        <div hx-get="{% url 'alertstreams:topic-choices' %}"
+             hx-trigger="change from:#id_stream_name"
+             hx-target="#id_topic"
+             hx-swap="innerHTML"
+             hx-include="#id_stream_name">
+        </div>
+
+        {# Progress indicator (CSS provided by TOM Toolkit base template) #}
+        <div class="progress">
+            <div class="indeterminate"></div>
+        </div>
+
+        {# Table container -- HTMX swaps this outerHTML on filter changes and auto-polls every 5 s #}
+        <div class="table-container"
+             hx-get="{{ request.get_full_path }}"
+             hx-trigger="every 5s"
+             hx-swap="innerHTML"
+             hx-include="#filter-form">
+            {% include table.get_partial_template_name %} {# render the table via it's partial #}
+        </div>
+    </div>
+</div>
+{% endblock %}

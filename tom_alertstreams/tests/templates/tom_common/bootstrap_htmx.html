@@ -1,0 +1,6 @@
+{# Test-harness stub for tom_common/bootstrap_htmx.html.                          #}
+{# HTMXTable.template_name points here; the real template adds HTMX sort/paginate #}
+{# attributes, but for view smoke tests we only need the table to render, so we   #}
+{# delegate to the built-in django_tables2 bootstrap4 template. Keeps tom_common  #}
+{# out of the test harness's INSTALLED_APPS.                                       #}
+{% extends "django_tables2/bootstrap4.html" %}

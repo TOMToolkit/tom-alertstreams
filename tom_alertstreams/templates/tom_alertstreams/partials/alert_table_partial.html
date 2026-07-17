@@ -1,0 +1,34 @@
+{# Custom partial for AlertTable HTMX responses.                              #}
+{# Renders the table, then appends an OOB swap to update the stream status    #}
+{# dashboard that lives outside the table container on the full page.         #}
+{% load render_table from django_tables2 %}
+
+{% render_table table %}
+
+{% if not table.data %}
+    <div class="alert alert-info mt-3">
+        {% if empty_database %}
+            No records in the database.
+        {% else %}
+            No records match those filters.
+        {% endif %}
+    </div>
+{% endif %}
+
+{# OOB swap: update the stream dashboard outside the table container.       #}
+{# Only included on HTMX requests — on full page loads the dashboard is     #}
+{# already rendered by recent_alerts.html and this partial is just inlined. #}
+{% if request.htmx %}
+<div id="stream-dashboard" hx-swap-oob="innerHTML">
+    {% include "tom_alertstreams/partials/stream_dashboard.html" %}
+</div>
+{% endif %}
+
+<script>
+document.body.addEventListener('change', function(e) {
+    if (e.target && e.target.classList.contains('header-checkbox')) {
+        const checkboxes = document.querySelectorAll('input[name="selected-row"]');
+        checkboxes.forEach(cb => cb.checked = e.target.checked);
+    }
+});
+</script>

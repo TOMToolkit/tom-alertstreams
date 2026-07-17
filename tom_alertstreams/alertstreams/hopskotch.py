@@ -1,178 +1,302 @@
-from datetime import datetime, timezone
+from __future__ import annotations
+
 import logging
 import re
-import uuid
 import traceback
+import uuid
+from datetime import datetime, timezone
+from typing import Any, ClassVar
 
-from django.utils import timezone as tz
 from django.core.exceptions import ImproperlyConfigured
+from django.utils import timezone as tz
 
 from hop import Stream
 from hop.auth import Auth
-from hop.models import JSONBlob
 from hop.io import Metadata, StartPosition, list_topics
+from hop.models import JSONBlob
 
-from tom_alertstreams.alertstreams.alertstream import AlertStream
+from tom_alertstreams.alertstreams.alertstream import AlertStream, AlertStreamConfig, NormalizedAlert
 
 logger = logging.getLogger(__name__)
 
 
+class HopskotchConfig(AlertStreamConfig):
+    """Pydantic configuration model for HopskotchAlertStream.
+
+    Inherits from AlertStreamConfig (a Pydantic BaseModel), so Pydantic validates
+    that URL, GROUP_ID, USERNAME, and PASSWORD are present.
+
+    Fields:
+        URL: Hopskotch broker URL (required). Typically 'kafka://kafka.scimma.org/'.
+        GROUP_ID: Kafka consumer group ID (required). Must be prefixed with your
+            SCiMMA username to match SCiMMA Auth permissions. Format:
+            '<scimma_username>-<unique-suffix>'.
+        USERNAME: SCiMMA Auth username (required). Obtain at https://hop.scimma.org/.
+        PASSWORD: SCiMMA Auth password (required). Obtain at https://hop.scimma.org/.
+        TOPIC_HANDLERS: Inherited from AlertStreamConfig. Maps Hopskotch topic names
+            to handler dotted-paths. Supports wildcards: '*' matches all public topics;
+            'prefix.*' matches topics whose names match the regex.
+        START_POSITION: Where to start consuming. 'LATEST' (default) means only new
+            messages; 'EARLIEST' replays from the beginning of the topic's retention window.
+    """
+    URL: str
+    GROUP_ID: str
+    USERNAME: str
+    PASSWORD: str
+    START_POSITION: str = 'LATEST'
+
+
 class HopskotchAlertStream(AlertStream):
+    """AlertStream implementation for SCiMMA Hopskotch (hop.scimma.org).
+
+    Hopskotch is a Kafka-based message bus for time-domain astronomy operated by
+    SCiMMA (https://scimma.org). It carries alerts from multiple sources including
+    HERMES and GW notices. This implementation uses the hop-client Python library.
+
+    Special topic support:
+      - '*' in TOPIC_HANDLERS subscribes to ALL public topics via the wildcard handler.
+      - 'prefix.*' patterns subscribe to all public topics matching the regex.
+      - Direct topic names take priority over wildcard matches.
+
+    Configuration example (settings.py ALERT_STREAMS entry):
+        {
+            'ACTIVE': True,
+            'NAME': 'tom_alertstreams.alertstreams.hopskotch.HopskotchAlertStream',
+            'OPTIONS': {
+                'URL': 'kafka://kafka.scimma.org/',
+                'GROUP_ID': os.environ.get('SCIMMA_AUTH_USERNAME', '') + '-my-tom',
+                'USERNAME': os.environ.get('SCIMMA_AUTH_USERNAME', ''),
+                'PASSWORD': os.environ.get('SCIMMA_AUTH_PASSWORD', ''),
+                'START_POSITION': 'LATEST',         # optional
+                'TOPIC_HANDLERS': {
+                    'sys.heartbeat': 'tom_alertstreams.alertstreams.hopskotch.heartbeat_handler',
+                    'hermes.*': 'tom_alertstreams.alertstreams.hopskotch.alert_logger',
+                },
+            },
+        }
+
+    See https://hop-client.readthedocs.io/ for hop-client documentation.
     """
-    """
-    required_keys = ['URL', 'GROUP_ID', 'USERNAME', 'PASSWORD', 'TOPIC_HANDLERS']
-    allowed_keys = ['URL', 'GROUP_ID', 'USERNAME', 'PASSWORD', 'TOPIC_HANDLERS', 'START_POSITION']
-    PUBLIC_TOPIC_CHECK_INTERVAL = 300  # Seconds between checking for new public topics
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # the following methods may fail if improperly configured.
-        # So, do them now to catch any errors, before listen() is spawned in it's own Process.
-        logger.debug(f'HopskotchAlertStream.__init__() kwargs: {kwargs}')
+    configuration_class = HopskotchConfig  # type: ignore[assignment]
+    STREAM_NAME: ClassVar[str] = 'hopskotch'
+
+    # Seconds between checks for new public topics when wildcard subscriptions are active.
+    PUBLIC_TOPIC_CHECK_INTERVAL: ClassVar[int] = 300
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        logger.debug(f'HopskotchAlertStream.__init__() config: {self.config}')
+
+        # Fetch public topics and build the stream URL up front — if the configuration
+        # is broken, we want to fail here (before listen() spawns in its own thread)
+        # so the error is visible immediately at startup.
         self.public_topics = self.get_all_public_topics()
         self.stream_url = self.get_stream_url()
 
         start_position = StartPosition.LATEST
-        if hasattr(self, 'start_position') and self.start_position == 'EARLIEST':
+        if self.config.START_POSITION == 'EARLIEST':
             start_position = StartPosition.EARLIEST
         self.stream = self.get_stream(start_position)
 
     def get_all_public_topics(self) -> list[str]:
-        """Returns the up-to-date list of Topic names to consume.
+        """Return the current list of publicly-readable Hopskotch topic names.
 
-        Use the saved options to repeatedly construct the topic list, and
-        keep it in sync with the publicaly_readable topics from SCiMMA Auth.
+        Queries the Hopskotch broker directly via the hop-client. Filters out
+        internal Kafka topics (those starting with '__' or containing no '.').
 
-        The Topic list is a combination of the
-          a. the publicly_readable Topics from SCiMMA Auth
-          b. any topics supplied on the command line via -T, --topic
+        Returns:
+            List of topic name strings available on the Hopskotch broker.
         """
-        hop_auth = Auth(self.username, self.password)
-        logger.info('getting publicly_readable topics from SCiMMA Auth.')
-        # use the hop-client to ask Kafka directly for the topics since SCiMMA Auth can be out of sync
-        # include only topics that a) contain a '.'; b) don't start with '__' (excludes __consumer_offsets)
-        publicly_readable_topics = [topic for topic in list_topics(self.url, hop_auth).keys()
-                                    if not (topic.startswith('__') and (topic.count('.')==0))]
-        logger.debug(f'publicly_readable_topics: {publicly_readable_topics}')
-
-        return publicly_readable_topics
+        hop_auth = Auth(self.config.USERNAME, self.config.PASSWORD)
+        logger.info('HopskotchAlertStream: fetching public topics from SCiMMA Auth.')
+        all_topics = list_topics(self.config.URL, hop_auth)
+        # Exclude internal Kafka topics (__consumer_offsets, etc.) and topics
+        # without a namespace separator (no '.') which are internal by convention.
+        publicly_readable = [
+            topic for topic in all_topics.keys()
+            if not (topic.startswith('__') and topic.count('.') == 0)
+        ]
+        logger.debug(f'HopskotchAlertStream public topics: {publicly_readable}')
+        return publicly_readable
 
     def get_stream_url(self) -> str:
-        """For Hopskotch, topics are specified on the url. So, this
-        method gets a base url (from super) and then adds topics to it.
+        """Build the Hopskotch stream URL with topics appended.
 
-        Hopskotch (hop.io) requires at least one topic to be specified.
+        Hopskotch requires topics to be specified in the URL rather than via a
+        subscribe() call. This method resolves wildcard patterns against the
+        current public topic list before building the URL.
 
-        You might not need a method like this if your Kafka client provides
-        alternative ways to subscribe to a topic. For example, the gcn_kafka.Consumer
-        class provides a 'substribe([list of topics])' method. (see gcn.py).
+        Returns:
+            Fully-qualified Hopskotch stream URL with topics.
+
+        Raises:
+            ImproperlyConfigured: if TOPIC_HANDLERS is empty (hop requires ≥1 topic).
         """
-        logger.debug(f'HopskotchAlertStream.get_stream_url topics: {list(self.topic_handlers.keys())}')
-        if self.topic_handlers == {}:
-            msg = 'Hopskotch requires at least one topic to open the stream. Check ALERT_STREAMS in settings.py'
-            raise ImproperlyConfigured(msg)
+        if not self.config.TOPIC_HANDLERS:
+            raise ImproperlyConfigured(
+                'HopskotchAlertStream requires at least one entry in TOPIC_HANDLERS. '
+                'Check ALERT_STREAMS in settings.py.'
+            )
 
-        base_stream_url = self.url
+        base_url = self.config.URL.rstrip('/') + '/'
 
-        # if not present, add trailing slash to base_stream url
-        # so, comma-separated topics can be appeneded.
-        if base_stream_url[-1] != '/':
-            base_stream_url += '/'
-
-        # append comma-separated topics to base URL
-        specified_topics = set(self.topic_handlers.keys())
-        if '*' in specified_topics:
-            # Add all public topics if a asterisk is set in the topic_handlers
-            specified_topics = specified_topics.union(set(self.public_topics))
+        # Expand wildcard patterns against the public topic list.
+        specified = set(self.config.TOPIC_HANDLERS.keys())
+        if '*' in specified:
+            # Full wildcard: subscribe to every public topic.
+            specified = specified | set(self.public_topics)
         else:
-            # Look over all topics, and if there are any with a partial wildcard in them, 
-            # Add all the public topics that match that partial wildcard
-            for topic in specified_topics:
-                if '*' in topic:
-                    specified_topics = specified_topics.union(
-                        set([t for t in self.public_topics if re.match(topic, t)]))
-                    
-        # Also remove topics with wildcards in them, and convert specified topics set to list
-        specified_topics = [topic for topic in specified_topics if not '*' in topic]
+            # Partial wildcards: 'hermes.*' → all public topics matching the regex.
+            for pattern in list(specified):
+                if '*' in pattern:
+                    specified |= {t for t in self.public_topics if re.match(pattern, t)}
 
-        topics = ','.join(specified_topics)  # 'topic1,topic2,topic3'
-        hopskotch_stream_url = base_stream_url + topics
+        # Remove the wildcard placeholders — real topic names only.
+        concrete_topics = [t for t in specified if '*' not in t]
+        hopskotch_url = base_url + ','.join(concrete_topics)
+        logger.debug(f'HopskotchAlertStream stream URL: {hopskotch_url}')
+        return hopskotch_url
 
-        logger.debug(f'HopskotchAlertStream.get_stream_url url: {hopskotch_stream_url}')
-        return hopskotch_stream_url
+    def get_stream(self, start_position: StartPosition = StartPosition.LATEST) -> Stream:
+        """Create and return a hop-client Stream object.
 
-    def get_stream(self, start_position=StartPosition.LATEST) -> Stream:
-        hop_auth = Auth(self.username, self.password)
+        Args:
+            start_position: Where to start consuming (LATEST or EARLIEST).
 
-        # TODO: allow StartPosition to be set from OPTIONS configuration dictionary
-        stream = Stream(auth=hop_auth, start_at=start_position)
-        return stream
+        Returns:
+            An authenticated hop.Stream ready for use in listen().
+        """
+        hop_auth = Auth(self.config.USERNAME, self.config.PASSWORD)
+        return Stream(auth=hop_auth, start_at=start_position)
 
-    def listen(self):
-        super().listen()
-        # TODO: alternatively, WARN upon OPTIONS['topics'] extries that don't have
-        # handlers in the alert_handler. (i.e they've configured a topic subscription
-        # without providing a handler for the topic. So, warn them).
+    def normalize_alert(self, raw_alert: Any, topic: str = '') -> NormalizedAlert:
+        """Extract common fields from a Hopskotch JSONBlob alert.
+
+        Hopskotch delivers alerts as hop.models.JSONBlob objects (or other hop model
+        types). The .content attribute holds the parsed dict. Since Hopskotch carries
+        alerts from many sources (HERMES, GW notices, etc.), only a generic extraction
+        is possible at this level; science-specific handlers should subclass and override.
+
+        Args:
+            raw_alert: A hop.models.JSONBlob (or similar hop model) object.
+            topic: The Hopskotch topic the alert arrived on.
+
+        Returns:
+            NormalizedAlert with stream_name, topic, and raw_payload populated.
+        """
+        content = getattr(raw_alert, 'content', None) or {}
+        alert_id = str(content.get('message_id', id(raw_alert)))
+        return NormalizedAlert(
+            stream_name=self.STREAM_NAME,
+            topic=topic,
+            observation_time=None,  # generic Hopskotch messages carry no parsed obs/publish time
+            published_time=None,
+            alert_id=alert_id,
+            raw_payload=content if isinstance(content, dict) else {},
+        )
+
+    def listen(self) -> None:
+        """Consume Hopskotch alerts and dispatch to configured topic handlers.
+
+        Runs an infinite loop reading from the Hopskotch stream. Periodically checks
+        for new public topics (every PUBLIC_TOPIC_CHECK_INTERVAL seconds) and restarts
+        the stream if the topic list has changed, so new topics are picked up without
+        a manual restart.
+
+        Topic matching priority:
+          1. Exact topic name match
+          2. Regex wildcard pattern match (e.g. 'hermes.*')
+          3. Catch-all '*' handler
+
+        Handler calling convention:
+            handler(alert, alert_stream=self, topic=topic, metadata=metadata)
+        Handlers absorb extras they do not need via **kwargs.
+        """
         last_check_time = tz.now()
         while True:
             try:
-                logger.info(f'HopskotchAlertStream.listen opening stream: {self.stream_url} with group_id: {self.group_id}')
-                with self.stream.open(self.stream_url, 'r', group_id=self.group_id) as src:
+                logger.info(
+                    f'HopskotchAlertStream: opening stream {self.stream_url} '
+                    f'with group_id: {self.config.GROUP_ID}'
+                )
+                with self.stream.open(self.stream_url, 'r', group_id=self.config.GROUP_ID) as src:
                     for alert, metadata in src.read(metadata=True):
-                        # type(gcn_circular) is <hop.models.GNCCircular>
-                        # type(metadata) is <hop.io.Metadata>
-                        if metadata.topic in self.alert_handler:
-                            # TODO: should probably use *args, **kwargs to pass unknow number of arguments
-                            self.alert_handler[metadata.topic](alert, metadata)
+                        topic = metadata.topic
+
+                        # Determine the handler: exact match, then regex wildcard, then '*'.
+                        if topic in self.alert_handler:
+                            handler = self.alert_handler[topic]
                         else:
-                            # First check all wildcard topics to see if they will match this topic
-                            matched_handler = False
-                            for topic in self.alert_handler.keys():
-                                if topic != '*' and '*' in topic and re.match(topic, metadata.topic):
-                                    self.alert_handler[topic](alert, metadata)
-                                    matched_handler = True
+                            handler = None
+                            for pattern, candidate in self.alert_handler.items():
+                                if pattern != '*' and '*' in pattern and re.match(pattern, topic):
+                                    handler = candidate
                                     break
-                            if not matched_handler:
-                                # If nothing matched and we have a catch all handler, fall back to default public topic handler
-                                if '*' in self.alert_handler:
-                                    self.alert_handler['*'](alert, metadata)
-                                else:
-                                    # TODO: should define a default handler for all unhandeled topics
-                                    logger.error(f'alert from topic {metadata.topic} received but no handler defined.')
+                            if handler is None:
+                                handler = self.alert_handler.get('*')
+
+                        if handler is not None:
+                            # Unified convention + Hopskotch-specific metadata kwarg.
+                            handler(alert, alert_stream=self, topic=topic, metadata=metadata)
+                        else:
+                            logger.error(
+                                f'HopskotchAlertStream: alert from topic "{topic}" received '
+                                f'but no handler matched. Configured: {list(self.alert_handler.keys())}'
+                            )
+
+                        # Periodically refresh public topics to pick up new ones automatically.
                         if (tz.now() - last_check_time).total_seconds() > self.PUBLIC_TOPIC_CHECK_INTERVAL:
                             last_check_time = tz.now()
-                            public_topics = self.get_all_public_topics()
-                            if set(public_topics) != set(self.public_topics):
-                                logger.info(f"New public topics found, restarting hop stream")
-                                self.public_topics = public_topics
+                            fresh_topics = self.get_all_public_topics()
+                            if set(fresh_topics) != set(self.public_topics):
+                                logger.info('HopskotchAlertStream: new public topics found — restarting stream.')
+                                self.public_topics = fresh_topics
                                 self.stream_url = self.get_stream_url()
-                                break
+                                break  # Exit inner loop; outer while True reopens the stream.
+
             except Exception as ex:
                 logger.error(f'HopskotchAlertStream.listen: {ex}')
-                logger.error(traceback.format_exc())  # Show the traceback so we have a chance of figuring out what is breaking
+                logger.error(traceback.format_exc())
 
-def heartbeat_handler(heartbeat: JSONBlob, metadata: Metadata):
-    """Example alert handler for HopskotchAlertStream sys.heartbeat topic.
 
-    Note that HopskotchAlertStream.listen() method knows that Hopskotch alerts come with
-    both alert and metadata. So, the alert_handler methods have a signiture (taking both
-    as arguments) specific to this stream.
+def heartbeat_handler(heartbeat: JSONBlob, **kwargs: Any) -> None:
+    """Example handler for the Hopskotch sys.heartbeat topic.
+
+    Logs every 300th heartbeat to avoid flooding the log. Copy into your TOM's
+    custom_code app and modify as needed.
+
+    The **kwargs signature absorbs alert_stream, topic, metadata, and any other
+    extras passed by the unified handler calling convention.
+
+    Args:
+        heartbeat: A hop.models.JSONBlob with a 'timestamp' and 'count' in .content.
+        **kwargs: Absorbs alert_stream, topic, metadata, and stream-specific extras.
     """
-    content: dict = heartbeat.content  # see hop_client reatthedocs
-    timestamp = datetime.fromtimestamp(content["timestamp"] / 1e6, tz=timezone.utc)
-    if heartbeat.content['count'] % 300 == 0:
-        # mod 300 just for convenience so as not to flood logger
-        logging.info(f'{timestamp.isoformat()} heartbeat.content dict: {heartbeat.content}. metadata: {metadata}')
+    content: dict = heartbeat.content
+    timestamp = datetime.fromtimestamp(content['timestamp'] / 1e6, tz=timezone.utc)
+    if content.get('count', 0) % 300 == 0:
+        logger.info(f'Hopskotch heartbeat at {timestamp.isoformat()}: {content}')
 
 
-def alert_logger(alert: JSONBlob, metadata: Metadata):
-    """Example alert handler. The method signsture is specific to Hopskotch alerts.
+def alert_logger(alert: JSONBlob, **kwargs: Any) -> None:
+    """Example alert handler for HopskotchAlertStream.
+
+    Logs the topic and alert UUID. Copy into your TOM's custom_code app and
+    modify as needed.
+
+    The **kwargs signature absorbs alert_stream, topic, metadata, and any other
+    extras passed by the unified handler calling convention. Access metadata via
+    kwargs.get('metadata') if needed.
+
+    Args:
+        alert: A hop.models.JSONBlob (or other hop model type).
+        **kwargs: Absorbs alert_stream, topic, metadata, and stream-specific extras.
     """
-    # search the header (list of tuples) for a UUID-tuple (keyed by '_id')
-    # eg. ('_id', b'$\xd6oGmVM\xed\x97\xe7|\x1c\x8f\x11V\xe9')
-    alert_uuid_tuple = next((item for item in metadata.headers if item[0] == '_id'), None)
-    if alert_uuid_tuple:
-        alert_uuid = uuid.UUID(bytes=alert_uuid_tuple[1])
-    else:
-        # in this case the alert was probably published with hop-client<0.8.0
-        alert_uuid = None
-    logger.info(f'Alert (uuid={alert_uuid}) received on topic {metadata.topic}: {alert};  metatdata: {metadata}')
+    metadata: Metadata | None = kwargs.get('metadata')
+    alert_uuid = None
+    if metadata is not None:
+        uuid_tuple = next((h for h in metadata.headers if h[0] == '_id'), None)
+        if uuid_tuple:
+            alert_uuid = uuid.UUID(bytes=uuid_tuple[1])
+    topic = kwargs.get('topic', getattr(metadata, 'topic', 'unknown') if metadata else 'unknown')
+    logger.info(f'Hopskotch alert (uuid={alert_uuid}) on topic "{topic}": {alert}')
